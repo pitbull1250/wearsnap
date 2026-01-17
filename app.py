@@ -32,43 +32,68 @@ if "has_generated" not in st.session_state:
 
 def apply_watermark_any(
     path: str,
-    text: str = "TRY-ON MVP  FREE",
-    opacity: int = 70,
-    step: int = 220,
+    text: str = "WearSnap",
+    opacity_pct: float = 0.07,
+    angle: float = 18.0,
 ):
-    """PNG/JPGどちらでも透かしを入れる（無料版用）"""
+    """
+    PNG/JPG両対応：オシャレ系の「1〜2箇所だけ」透かし
+    - 文字は大きめ（画像幅に比例）
+    - 薄め（opacity_pct）
+    - 斜め（angle）
+    """
+    if not os.path.exists(path):
+        return
+
     img = Image.open(path).convert("RGBA")
     W, H = img.size
+
+    font_size = max(28, int(min(W, H) * 0.10))
+
+    font = None
+    candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/System/Library/Fonts/SFNS.ttf",
+        "Arial.ttf",
+    ]
+    for fp in candidates:
+        try:
+            font = ImageFont.truetype(fp, font_size)
+            break
+        except Exception:
+            pass
+    if font is None:
+        font = ImageFont.load_default()
 
     overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
-def apply_watermark_any(path: str, text: str = "TRY-ON MVP  FREE", opacity: int = 70, step: int = 220):
-    """
-    PNG / JPG 両対応の透かし処理
-    """
-    img = Image.open(path).convert("RGBA")
-    W, H = img.size
-
-    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
+    alpha = int(255 * max(0.0, min(1.0, opacity_pct)))
+    fill = (255, 255, 255, alpha)
 
     try:
-        font = ImageFont.truetype("Arial.ttf", size=max(28, int(min(W, H) * 0.05)))
+        bbox = draw.textbbox((0, 0), text, font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
     except Exception:
-        font = ImageFont.load_default()
+        tw, th = draw.textsize(text, font=font)
 
-    for yy in range(-H, H * 2, step):
-        for xx in range(-W, W * 2, step):
-            draw.text((xx, yy), text, font=font, fill=(255, 255, 255, opacity))
+    margin = int(min(W, H) * 0.04)
+    positions = [
+        (margin, margin),
+        (W - tw - margin, H - th - margin),
+    ]
 
-    overlay = overlay.rotate(-22, expand=False)
+    for (x, y) in positions:
+        draw.text((x, y), text, font=font, fill=fill)
+
+    overlay = overlay.rotate(angle, resample=Image.BICUBIC, expand=False)
     out = Image.alpha_composite(img, overlay)
 
     if path.lower().endswith(".png"):
         out.save(path, format="PNG")
     else:
         out.convert("RGB").save(path, format="JPEG", quality=95)
+
 def auto_rgba_with_rembg(uploaded_bytes: bytes, out_path: str):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     inp = Image.open(io.BytesIO(uploaded_bytes)).convert("RGBA")
