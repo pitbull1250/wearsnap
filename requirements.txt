@@ -2,5 +2,5 @@ streamlit
 pillow
 rembg
 opencv-python-headless
-numpy
-onnxruntime
+numpy<2
+onnxruntime==1.17.3
