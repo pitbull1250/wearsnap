@@ -136,36 +136,48 @@ def estimate_cx_y_w(person_rgb_path: str, person_rgba_path: str):
     import cv2
     import numpy as np
 
-    img = cv2.imread(person_rgb_path)
-    H, W = img.shape[:2]
-
-    # y：顔検出（顔の下＝首元目安）
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    face_cascade = cv2.CascadeClassifier(
-        cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-    )
-    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
-
-    y = 0.32  # fallback（今の当たり値）
-    if len(faces) > 0:
-        x, fy, fw, fh = max(faces, key=lambda r: r[2] * r[3])
-        y = (fy + fh) / H + 0.03
-
-    # cx / w：人物マスクの横幅から推定
+    # fallback（今の当たり値）
     cx = 0.51
+    y = 0.32
     w = 1.02
+
+    # まずは人物マスク（RGBAのalpha）から “胴体っぽいbbox” を推定
     if person_rgba_path and os.path.exists(person_rgba_path):
         rgba = cv2.imread(person_rgba_path, cv2.IMREAD_UNCHANGED)  # BGRA
-        alpha = rgba[:, :, 3]
-        ys, xs = np.where(alpha > 10)
-        if len(xs) > 0:
-            x0, x1 = xs.min(), xs.max()
-            cx = ((x0 + x1) / 2) / W
-            w = ((x1 - x0) / W) * 1.10  # ちょい大きめ
+        if rgba is not None and rgba.shape[2] == 4:
+            alpha = rgba[:, :, 3]
+            mask = (alpha > 10).astype(np.uint8) * 255
 
+            ys, xs = np.where(mask > 0)
+            if len(xs) > 0:
+                H, W = mask.shape[:2]
+                y0, y1 = ys.min(), ys.max()
+                x0, x1 = xs.min(), xs.max()
+                bbox_h = y1 - y0 + 1
+
+                # 胴体っぽい範囲（頭と足を切る）
+                t0 = int(y0 + bbox_h * 0.25)
+                t1 = int(y0 + bbox_h * 0.80)
+
+                rows = np.arange(H)[:, None]
+                torso = (mask > 0) & (rows >= t0) & (rows <= t1)
+                ys2, xs2 = np.where(torso)
+
+                # 胴体が取れたらそれを優先
+                if len(xs2) > 0:
+                    x0, x1 = xs2.min(), xs2.max()
+                    y0, y1 = ys2.min(), ys2.max()
+
+                # ここから推定
+                cx = ((x0 + x1) / 2) / W
+                y = (y0 / H) + 0.02         # 上端オフセット（少し下げる）
+                w = ((x1 - x0 + 1) / W) * 1.15
+
+    # 値の安全クリップ
     cx = float(max(0.0, min(1.0, cx)))
     y = float(max(0.0, min(1.0, y)))
     w = float(max(0.3, min(1.3, w)))
+
     return cx, y, w
 
 st.set_page_config(page_title="Virtual Try-on MVP (Top)", layout="wide")
@@ -347,9 +359,16 @@ def do_generate(
 
         return rc
 # ---- Actions ----
+mode = st.sidebar.radio(
+    "体型モード",
+    ["大人", "子供（小学生以下）"],
+    index=0
+)
+is_child = mode.startswith("子供")
 auto_fit = st.sidebar.checkbox("自動位置合わせ（おすすめ）", value=True)
 
 if gen_btn:
+    # ① AUTO / MANUAL で基準値を決める
     if (
         auto_fit
         and person_upload is not None
@@ -357,38 +376,34 @@ if gen_btn:
         and os.path.exists(person_rgba_path)
     ):
         st.session_state.last_mode = "AUTO"
-
-        cx2, y2, w2 = estimate_cx_y_w(person_path, person_rgba_path)
-        w2 = min(1.30, w2 + 0.15)  # 子供対策
-
-        rc = do_generate(
-            OUT_FINAL,
-            "生成中（final）",
-            top_path,
-            cx2, y2, w2,
-            angle,
-            alpha
-        )
+        cx_use, y_use, w_use = estimate_cx_y_w(person_path, person_rgba_path)
     else:
         st.session_state.last_mode = "MANUAL"
+        cx_use, y_use, w_use = cx, y, w
 
-        st.sidebar.caption(
-            f"AUTO_CHECK: upload={person_upload is not None}, "
-            f"rgba={person_rgba_path}, "
-            f"exists={os.path.exists(person_rgba_path) if person_rgba_path else False}"
-        )
+    # ② 共通の安全補正（弱め）
+    w_use = min(1.25, w_use + 0.05)
 
-        rc = do_generate(
-            OUT_FINAL,
-            "生成中（final）",
-            top_path,
-            cx, y, w,
-            angle,
-            alpha
-        )
+    # ③ モード補正（※ここ重要）
+    if is_child:
+        # 子供：上げすぎると顎下に来るので弱め
+        y_use = max(0.10, y_use - 0.02)
+        w_use = min(1.25, w_use + 0.03)
+    else:
+        # 大人：もう少し上げたい
+        y_use = max(0.10, y_use - 0.05)
+        w_use = min(1.25, w_use + 0.05)
 
-    st.sidebar.caption(
-        f"MODE={st.session_state.last_mode} / rc={rc} / final exists={os.path.exists(OUT_FINAL)}"
+    # ④ 生成（★必ず if gen_btn の中）
+    rc = do_generate(
+        OUT_FINAL,
+        "生成中（final）",
+        top_path,
+        cx_use,
+        y_use,
+        w_use,
+        angle,
+        alpha,
     )
 
     st.session_state.has_generated = (rc == 0)
