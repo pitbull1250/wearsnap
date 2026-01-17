@@ -1,3 +1,4 @@
+angle: float = 18.0,
 import io
 import os
 import subprocess
@@ -33,7 +34,7 @@ if "has_generated" not in st.session_state:
 def apply_watermark_any(
     path: str,
     text: str = "WearSnap",
-    opacity_pct: float = 0.07,
+    opacity_pct: float = 0.16,
     angle: float = 18.0,
 ):
     """
@@ -69,7 +70,7 @@ def apply_watermark_any(
     draw = ImageDraw.Draw(overlay)
 
     alpha = int(255 * max(0.0, min(1.0, opacity_pct)))
-    fill = (255, 255, 255, alpha)
+    fill = (0, 0, 0, alpha)  # 黒（白服でも見える）
 
     try:
         bbox = draw.textbbox((0, 0), text, font=font)
@@ -380,9 +381,13 @@ def do_generate(
         else:
             if is_free:
                 apply_watermark_any(out_path)
+                st.sidebar.warning("WATERMARK APPLIED ✅")
+            else:
+                st.sidebar.success("NO WATERMARK (PAID)")
+
             st.success(f"Saved: {out_path}")
 
-        return rc
+    return rc
 # ---- Actions ----
 mode = st.sidebar.radio(
     "体型モード",
