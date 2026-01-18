@@ -16,3 +16,7 @@ outputs/
 step*_test.py
 *.bak
 *.save
+
+# Old experimental scripts
+step3_overlay.py
+step_pants_*.py
