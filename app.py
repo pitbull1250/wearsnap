@@ -318,8 +318,6 @@ if "cx" not in locals():
 btn1, btn2 = st.columns(2)
 with btn1:
     gen_btn = st.button("👕 試着する", disabled=(not ready_all), use_container_width=True)
-with btn2:
-    save_btn = st.button("✅ これで確定保存（final）", disabled=(not os.path.exists(OUT_FINAL)), use_container_width=True)
 
 # last info (debug値)
 if "last_mode" not in st.session_state:
