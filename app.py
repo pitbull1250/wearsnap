@@ -1,9 +1,9 @@
-angle: float = 18.0,
 import io
 import os
 import subprocess
 import sys
 import time
+import hashlib
 
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
@@ -113,7 +113,6 @@ OUT_TMP = "outputs/tryon_tmp.jpg"
 OUT_FINAL = "outputs/tryon_top_final.jpg"
 
 # ---- person cache ----
-PERSON_RGBA = None
 PERSON_RGB = "assets/uploaded_person.jpg"
 def apply_watermark_jpg(path: str, text: str = "TRY-ON MVP  FREE", opacity: int = 70, step: int = 220):
     """
@@ -206,26 +205,28 @@ def estimate_cx_y_w(person_rgb_path: str, person_rgba_path: str):
 
     return cx, y, w
 
-st.set_page_config(page_title="Virtual Try-on MVP (Top)", layout="wide")
-st.title("👕 Virtual Try-on MVP（トップス）")
-st.caption("※雰囲気確認用の試着です（サイズ厳密再現はしません）")
+st.set_page_config(page_title="WearSnap", layout="wide")
 
-# ---- Sidebar ----
-st.sidebar.header("入力")
-st.sidebar.header("プラン")
-plan = st.sidebar.radio("無料 / 有料", ["無料（透かしあり）", "有料（透かしなし）"], index=0)
+st.title("👕 WearSnap")
+st.caption("写真1枚で、服の試着イメージをすぐ確認")
+
+st.markdown("## プラン")
+plan = st.radio("無料 / 有料", ["無料（透かしあり）", "有料（透かしなし）"], index=0, horizontal=True)
 is_free = plan.startswith("無料")
-st.sidebar.subheader("人物（アップロード）")
-person_upload = st.sidebar.file_uploader(
-    "人物写真をアップロード（jpg/png）",
-    type=["jpg", "jpeg", "png"]
+
+# =========================
+# WearSnap Wizard (Main UI)
+# =========================
+
+st.subheader("🧭 WearSnap：かんたん3ステップ")
+
+# Step 1) 人物
+st.markdown("## 1) 人物写真")
+person_upload = st.file_uploader(
+    "人物写真をアップロード（jpg / png）",
+    type=["jpg", "jpeg", "png"],
+    key="person_upload_main",
 )
-
-from PIL import UnidentifiedImageError
-
-# 保存先（固定）
-PERSON_RGB = "assets/uploaded_person.jpg"
-PERSON_RGBA = "assets/uploaded_person_rgba.png"
 
 person_path = None
 person_rgba_path = None
@@ -247,19 +248,19 @@ if person_upload is not None:
         Image.open(io.BytesIO(out_bytes)).convert("RGBA").save(PERSON_RGBA)
         person_rgba_path = PERSON_RGBA
 
+        st.success("人物写真を読み込みました ✅")
+
     except UnidentifiedImageError:
-        st.sidebar.error("人物写真が読み込めません（JPEG/PNGで再アップロード。HEIC不可）")
+        st.error("人物写真が読み込めません（JPEG/PNGで再アップロード。HEIC不可）")
         person_path = None
         person_rgba_path = None
 
-st.sidebar.subheader("トップス（アップロード）")
-import hashlib
-
-import hashlib
-
-top_upload = st.sidebar.file_uploader(
-    "服画像をアップロード（jpg/png）",
-    type=["jpg", "jpeg", "png"]
+# Step 2) 服
+st.markdown("## 2) 服画像（トップス）")
+top_upload = st.file_uploader(
+    "服画像をアップロード（jpg / png）",
+    type=["jpg", "jpeg", "png"],
+    key="top_upload_main",
 )
 
 AUTO_TOP_PATH = "assets/uploaded_top_rgba.png"
@@ -276,76 +277,86 @@ if top_upload is not None:
     if sig != st.session_state.top_sig:
         st.session_state.top_sig = sig
         st.session_state.top_path = auto_rgba_with_rembg(raw, AUTO_TOP_PATH)
-        st.sidebar.success("背景を自動で透過しました ✅")
-
         st.session_state.has_generated = False
-
         if os.path.exists(OUT_FINAL):
             os.remove(OUT_FINAL)
+        st.success("服の背景を自動で透過しました ✅")
 
 top_path = st.session_state.top_path
-st.sidebar.header("パラメータ（スライダー）")
-# あなたの当たり値をデフォルトにしておく
-cx = st.sidebar.slider("cx（中心X）", 0.00, 1.00, 0.51, 0.01)
-y = st.sidebar.slider("y（上端Y）", 0.00, 1.00, 0.32, 0.01)
-w = st.sidebar.slider("w（幅）", 0.30, 1.30, 1.02, 0.01)
-angle = st.sidebar.slider("angle（回転）", -10.0, 10.0, -1.5, 0.5)
-alpha = st.sidebar.slider("alpha（透過）", 0.10, 1.00, 1.00, 0.01)
 
-st.sidebar.markdown("---")
-gen_btn = st.sidebar.button("試着する", disabled=(top_path is None), width="stretch")
-save_btn = st.sidebar.button("✅ これで確定保存（final）", use_container_width=True)
+# 入力が揃ったか
+ready_person = person_path is not None and os.path.exists(person_path)
+ready_top = top_path is not None and os.path.exists(top_path)
+ready_all = ready_person and ready_top
 
-st.sidebar.markdown("---")
-# --- last run info (debug) ---
+st.markdown("### ✅ 入力チェック")
+c1, c2 = st.columns(2)
+with c1:
+    st.write("人物：", "OK ✅" if ready_person else "未アップロード ❌")
+with c2:
+    st.write("服：", "OK ✅" if ready_top else "未アップロード ❌")
+
+# Step 3) 設定 + 実行
+st.markdown("## 3) 設定して試着")
+
+mode = st.radio("体型モード", ["大人", "子供（小学生以下）"], index=0, horizontal=True)
+is_child = mode.startswith("子供")
+
+auto_fit = st.checkbox("自動位置合わせ（おすすめ）", value=True)
+
+with st.expander("微調整（上級者向け）", expanded=False):
+    cx = st.slider("cx（中心X）", 0.00, 1.00, 0.51, 0.01)
+    y = st.slider("y（上端Y）", 0.00, 1.00, 0.32, 0.01)
+    w = st.slider("w（幅）", 0.30, 1.30, 1.02, 0.01)
+    angle = st.slider("angle（回転）", -10.0, 10.0, -1.5, 0.5)
+    alpha = st.slider("alpha（透過）", 0.10, 1.00, 1.00, 0.01)
+
+# 微調整を開いてない人向けのデフォルト値（expander内変数が未定義になるのを防ぐ）
+if "cx" not in locals():
+    cx, y, w, angle, alpha = 0.51, 0.32, 1.02, -1.5, 1.00
+
+btn1, btn2 = st.columns(2)
+with btn1:
+    gen_btn = st.button("👕 試着する", disabled=(not ready_all), use_container_width=True)
+with btn2:
+    save_btn = st.button("✅ これで確定保存（final）", disabled=(not os.path.exists(OUT_FINAL)), use_container_width=True)
+
+# last info (debug値)
 if "last_mode" not in st.session_state:
     st.session_state.last_mode = "-"
 if "last_used" not in st.session_state:
     st.session_state.last_used = "-"
 
-st.sidebar.caption(f"MODE: {st.session_state.last_mode}")
-st.sidebar.caption(st.session_state.last_used)
-
-st.sidebar.subheader("実行コマンド")
-st.sidebar.caption("下に表示されるコマンドはコピペ可能です（デバッグ用）")
-
 # ---- Main layout ----
 col1, col2 = st.columns(2)
 
 with col1:
-    st.subheader("入力プレビュー")
+    with st.container(border=True):
+        st.subheader("入力プレビュー")
 
-    # --- 人物 ---
-    st.caption("人物")
-    if person_path is None:
-        st.empty()
-    elif os.path.exists(person_path):
-        st.image(person_path, width="stretch")
-    else:
-        st.warning("人物写真が見つかりません。")
+        st.markdown("**人物**")
+        if person_path and os.path.exists(person_path):
+            st.image(person_path, width=560)
+        else:
+            st.info("① 人物写真をアップロードしてください")
 
-    # --- トップス ---
-    st.caption("トップス（透過PNG）")
-    if top_path is None:
-        st.empty()
-    elif os.path.exists(top_path):
-        st.image(top_path, width="stretch")
-    else:
-        st.warning("トップス画像が見つかりません。")
+        st.markdown("---")
 
-# ---- Actions ----
-# ---- Actions ----
-# ---- Actions ----
+        st.markdown("**トップス**")
+        if top_path and os.path.exists(top_path):
+            st.image(top_path, width=720)  # ← あえて固定
+        else:
+            st.info("② トップス画像をアップロードしてください")
+
 with col2:
-    st.subheader("結果")
-    st.caption("final（確定）")
+    with st.container(border=True):
+        st.subheader("✨ 試着結果")
 
-    if not os.path.exists(OUT_FINAL):
-        st.info("左の「試着する」を押してください。")
-    else:
-        with open(OUT_FINAL, "rb") as f:
-            img_bytes = f.read()
-        st.image(img_bytes, width="stretch")
+        if os.path.exists(OUT_FINAL):
+            st.success("試着が完了しました")
+            st.image(OUT_FINAL, width=900)  # ← ★ここが違う
+        else:
+            st.info("③ 「試着する」を押すと、ここに結果が表示されます")
 
 def do_generate(
     out_path: str,
