@@ -140,7 +140,17 @@ def apply_watermark_jpg(path: str, text: str = "TRY-ON MVP  FREE", opacity: int 
     out = Image.alpha_composite(base, overlay).convert("RGB")
     out.save(path, quality=95)
 
-def run_tryon(person_path: str, top_path: str, cx: float, y: float, w: float, angle: float, alpha: float, out_path: str):
+def run_tryon(
+    person_path: str,
+    top_path: str,
+    cx: float,
+    y: float,
+    w: float,
+    angle: float,
+    alpha: float,
+    out_path: str,
+    person_rgba_path: str = None,
+):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
     cmd = [
@@ -154,6 +164,15 @@ def run_tryon(person_path: str, top_path: str, cx: float, y: float, w: float, an
         "--alpha", f"{alpha:.4f}",
         "--out", out_path,
     ]
+
+    # rembg（人物マスクRGBA）がある時だけ渡す（空文字は絶対入れない）
+    if person_rgba_path and os.path.exists(person_rgba_path):
+        cmd += ["--person_rgba", person_rgba_path]
+
+    # ここが一番確実（Streamlit起動してるターミナルに出る）
+    print("CMD_DEBUG_LIST:", cmd)
+    print("CMD_DEBUG_STR :", " ".join(cmd))
+
     p = subprocess.run(cmd, capture_output=True, text=True)
     return p.returncode, p.stdout, p.stderr, " ".join(cmd)
 
@@ -390,13 +409,14 @@ def do_generate(
             top_path_in,
             cx_in, y_in, w_in,
             angle_in, alpha_in,
-            out_path
+            out_path,
+            person_rgba_path=person_rgba_path,
         )
 
-        st.sidebar.markdown("### 実行ログ（デバッグ）")
-        st.sidebar.code(cmdline)
-        st.sidebar.code(out if out else "(stdout empty)")
-        st.sidebar.code(err if err else "(stderr empty)")
+        with st.expander("🛠 実行ログ（デバッグ）", expanded=False):
+            st.code(cmdline)
+            st.code(out if out else "(stdout empty)")
+            st.code(err if err else "(stderr empty)")
 
         if rc != 0:
             st.error("生成に失敗しました。エラーを確認してください。")
