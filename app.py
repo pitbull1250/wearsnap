@@ -354,7 +354,20 @@ with col2:
 
         if os.path.exists(OUT_FINAL):
             st.success("試着が完了しました")
-            st.image(OUT_FINAL, width=900)  # ← ★ここが違う
+
+            # 結果画像表示
+            st.image(OUT_FINAL, width=900)
+
+            # 📥 ダウンロードボタン
+            with open(OUT_FINAL, "rb") as f:
+                st.download_button(
+                    label="📥 画像を保存する",
+                    data=f.read(),              # ←安定のため read() 推奨
+                    file_name="wearsnap_result.jpg",
+                    mime="image/jpeg",
+                    use_container_width=True,
+                )
+
         else:
             st.info("③ 「試着する」を押すと、ここに結果が表示されます")
 
