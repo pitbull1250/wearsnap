@@ -47,6 +47,17 @@ def overlay_rgba(base_bgr, top_rgba, x, y, alpha_scale=1.0):
     if rim.any():
         rgb = top_u8[:, :, :3]
         rgb_fixed = cv2.inpaint(rgb, rim, 3, cv2.INPAINT_TELEA)
+    # --- 黒フチ除去：半透明エッジのRGBをinpaintして黒マットを消す ---
+    top_u8 = np.clip(top_crop, 0, 255).astype(np.uint8)
+    a = top_u8[:, :, 3]
+
+    # 半透明エッジ（黒フチが出やすい場所）※範囲を広めに取る
+    rim = ((a > 0) & (a < 250)).astype(np.uint8) * 255
+
+    if rim.any():
+        rgb = top_u8[:, :, :3]
+        # 半径を少し大きめ（効きが強くなる）
+        rgb_fixed = cv2.inpaint(rgb, rim, 11, cv2.INPAINT_TELEA)
         top_u8[:, :, :3] = rgb_fixed
 
     top_crop = top_u8.astype(np.float32)
@@ -54,12 +65,13 @@ def overlay_rgba(base_bgr, top_rgba, x, y, alpha_scale=1.0):
     # alpha（服の透明度）
     alpha = (top_crop[:, :, 3] / 255.0) * float(alpha_scale)
 
-    # 4) alpha収縮（黒フチ削り）※やりすぎると服が細るので 1〜2推奨
-    a8 = (alpha * 255).astype(np.uint8)
-    a8 = cv2.erode(a8, k, iterations=1)
+    # --- alpha収縮（黒フチを削る）---
+    k = np.ones((3, 3), np.uint8)
+    a8 = np.clip(alpha * 255.0, 0, 255).astype(np.uint8)
+    a8 = cv2.erode(a8, k, iterations=4)
 
-    # 5) フェザー（自然に）
-    a8 = cv2.GaussianBlur(a8, (0, 0), sigmaX=0.8)
+    # --- フェザー（自然に馴染ませる）---
+    a8 = cv2.GaussianBlur(a8, (0, 0), sigmaX=1.5)
 
     alpha = a8.astype(np.float32) / 255.0
     alpha = np.clip(alpha, 0.0, 1.0)
@@ -69,6 +81,44 @@ def overlay_rgba(base_bgr, top_rgba, x, y, alpha_scale=1.0):
     base_bgr[y1:y2, x1:x2] = out.astype(np.uint8)
     return base_bgr
 
+def alpha_mask_from_rgba(rgba, thr=10):
+    """RGBAのalphaから人物マスク(0/255)を作る"""
+    if rgba is None or rgba.ndim != 3 or rgba.shape[2] < 4:
+        return None
+    a = rgba[:, :, 3]
+    m = (a > thr).astype(np.uint8) * 255
+    return m
+
+
+def estimate_neck_y_from_mask(mask_u8):
+    """
+    人物マスク(0/255)から首ラインYを推定
+    - 上から下に走査して、マスク幅が急に増える位置＝首→肩の境界を探す
+    """
+    H, W = mask_u8.shape[:2]
+    rows = (mask_u8 > 0).sum(axis=1).astype(np.float32)  # 各yのマスク幅（px）
+
+    # ノイズ対策で平滑化
+    rows_s = cv2.GaussianBlur(rows.reshape(-1, 1), (1, 31), 0).reshape(-1)
+
+    # 頭の開始位置（最初にマスクが出現する場所）
+    ys = np.where(rows_s > (W * 0.01))[0]
+    if ys.size == 0:
+        return int(H * 0.20)  # fallback
+    y_top = int(ys[0])
+
+    # 走査範囲：上から50%くらいまで（首はこの辺にある）
+    y_end = int(H * 0.55)
+
+    # 「増え方」を見て、最大増分の地点を首とみなす
+    diff = np.diff(rows_s)
+    diff[:y_top] = 0
+    diff[y_end:] = 0
+
+    neck_y = int(np.argmax(diff))
+    # 安全クリップ
+    neck_y = max(y_top + 5, min(neck_y, y_end))
+    return neck_y
 
 def alpha_bbox(rgba, thr=10):
     """rgba(H,W,4) の alpha>thr の領域bboxを返す (left, top, right, bottom)"""
@@ -141,7 +191,7 @@ def main():
     p.add_argument("--person", default="assets/person.jpg")
     p.add_argument("--top", default="assets/top_rgba.png")
     p.add_argument("--cx", type=float, default=0.50, help="中心X (0..1)")
-    p.add_argument("--y", type=float, default=0.28, help="上端Y (0..1)")
+    p.add_argument("--y", type=float, default=15.0, help="首位置からのYオフセット(px)")
     p.add_argument("--w", type=float, default=1.00, help="幅（人物比）")
     p.add_argument("--angle", type=float, default=0.0)
     p.add_argument("--alpha", type=float, default=1.0)
@@ -155,33 +205,90 @@ def main():
     if person is None:
         raise FileNotFoundError(f"Person image not found: {args.person}")
     H, W = person.shape[:2]
+    neck_y = int(H * 0.20)  # fallback
 
-    # --- 胴体だけ元の服を弱める処理（rembgマスク使用） ---
+    mask_u8 = None
     if args.person_rgba and os.path.exists(args.person_rgba):
         rgba = cv2.imread(args.person_rgba, cv2.IMREAD_UNCHANGED)
         if rgba is not None and rgba.shape[2] == 4:
-            alpha = rgba[:, :, 3]
+            mask_u8 = alpha_mask_from_rgba(rgba, thr=10)
+            if mask_u8 is not None:
+                neck_y = estimate_neck_y_from_mask(mask_u8)
 
-            mask = (alpha > 10).astype(np.uint8) * 255
-            ys, xs = np.where(mask > 0)
-            if len(xs) > 0:
-                y0, y1 = ys.min(), ys.max()
-                x0, x1 = xs.min(), xs.max()
+    # 推定が下すぎる保険（顎に被りやすいのを防ぐ）
+    neck_y = min(neck_y, int(H * 0.24))
+    neck_y = max(neck_y, int(H * 0.12))
 
-                bbox_h = y1 - y0 + 1
+    print(
+        "DEBUG neck_y(px) =", neck_y,
+        "/ H =", H,
+        "=> ratio =", round(neck_y / H, 3)
+    )
+    # --- 胴体だけ「元の服を消す（下地化）」処理（rembgマスク使用） ---
+    # 狙い：
+    #   1) 元の服の柄・輪郭を弱める（ぼかし）
+    #   2) 元の服の陰影をフラット化（コントラスト/彩度を落とす）
+    #   3) マスクは「胴体帯(25%〜82%)」に限定して自然にフェザー
+    if args.person_rgba and os.path.exists(args.person_rgba):
+        rgba = cv2.imread(args.person_rgba, cv2.IMREAD_UNCHANGED)
+        if rgba is not None and rgba.ndim == 3 and rgba.shape[2] == 4:
+            a = rgba[:, :, 3]
+
+            # 人物領域マスク（0/255）
+            person_mask = (a > 10).astype(np.uint8) * 255
+
+            ys, xs = np.where(person_mask > 0)
+            if ys.size > 0:
+                y0, y1 = int(ys.min()), int(ys.max())
+                x0, x1 = int(xs.min()), int(xs.max())
+                bbox_h = max(1, (y1 - y0 + 1))
+
+                # 胴体帯（頭と脚を避ける。少し広めに）
                 t0 = int(y0 + bbox_h * 0.25)
-                t1 = int(y0 + bbox_h * 0.80)
+                t1 = int(y0 + bbox_h * 0.82)
 
-                torso_mask = np.zeros((H, W), dtype=np.uint8)
-                torso_mask[t0:t1, x0:x1] = mask[t0:t1, x0:x1]
+                torso = np.zeros((H, W), dtype=np.uint8)
+                torso[t0:t1, x0:x1] = person_mask[t0:t1, x0:x1]
 
-                torso_mask = cv2.GaussianBlur(torso_mask, (31, 31), 0)
-
-                person_dark = (person * 0.75).astype(np.uint8)
-                m = torso_mask.astype(np.float32) / 255.0
+                # フェザー（強め）— 境界を自然に
+                torso = cv2.GaussianBlur(torso, (0, 0), sigmaX=18)
+                m = torso.astype(np.float32) / 255.0
                 m3 = np.dstack([m, m, m])
 
-                person = (person * (1 - m3) + person_dark * m3).astype(np.uint8)
+                # 1) ぼかし（元服の柄・輪郭を消す）
+                blur = cv2.GaussianBlur(person, (0, 0), sigmaX=6)
+
+                # 2) 彩度を落とす（色の主張を消す）
+                hsv = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV).astype(np.float32)
+                hsv[:, :, 1] *= 0.35  # 彩度 35%
+                hsv[:, :, 2] = np.clip(hsv[:, :, 2] * 0.92 + 12, 0, 255)  # 少し明るく
+                neutral = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+
+                # 3) コントラストを落とす（陰影を平らに）
+                neutral_f = neutral.astype(np.float32)
+                neutral_f = neutral_f * 0.90 + 15.0
+
+                # 合成：胴体だけ neutral に寄せる（強め）
+                person_f = person.astype(np.float32)
+                person = (person_f * (1.0 - m3) + neutral_f * m3).astype(np.uint8)
+                # --- 追加：裾ゾーン強化（元服の残りをさらに抑える） ---
+                # 胴体帯の下側（だいたい 60%〜95%）をもう一段だけ強めに無地化する
+                hem0 = int(y0 + bbox_h * 0.60)
+                hem1 = int(y0 + bbox_h * 0.95)
+
+                hem = np.zeros((H, W), dtype=np.uint8)
+                hem[hem0:hem1, x0:x1] = person_mask[hem0:hem1, x0:x1]
+
+                # フェザー（境界が出ないよう強め）
+                hem = cv2.GaussianBlur(hem, (0, 0), sigmaX=22)
+                mh = hem.astype(np.float32) / 255.0
+                mh3 = np.dstack([mh, mh, mh])
+
+                # 裾だけさらに「彩度・コントラスト」を落として薄くする
+                neutral2 = neutral.astype(np.float32)
+                neutral2 = neutral2 * 0.88 + 22.0  # さらにフラット＆少し明るめ
+
+                person = (person.astype(np.float32) * (1.0 - mh3) + neutral2 * mh3).astype(np.uint8)
 
     # ↓↓↓ この下に既存の top 合成処理が続く（触らなくてOK）
 
@@ -246,7 +353,7 @@ def main():
         left, top_y, right, bottom = bb
         bb_cx = (left + right) / 2.0
         x = int(W * float(args.cx) - bb_cx)
-        y = int(H * float(args.y) - top_y)
+        y = int(neck_y + H * float(args.y) - top_y)
 
     comp = overlay_rgba(person, top_rot, x, y, alpha_scale=float(args.alpha))
 
