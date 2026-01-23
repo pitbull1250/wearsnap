@@ -199,11 +199,10 @@ def main():
                 x0, x1 = int(xs.min()), int(xs.max())
                 bbox_h = max(1, (y1 - y0 + 1))
 
-                # 胴体帯（25%〜82%）
+                # 胴体帯（25%〜75%）
                 t0 = int(y0 + bbox_h * 0.25)
                 t1 = int(y0 + bbox_h * 0.75)
 
-                # 念のためクリップ
                 t0 = max(0, min(H - 1, t0))
                 t1 = max(0, min(H, t1))
                 if t1 > t0:
@@ -227,7 +226,7 @@ def main():
                     person_f = person.astype(np.float32)
                     person = (person_f * (1.0 - m3) + neutral_f * m3).astype(np.uint8)
 
-                    # --- 裾ゾーン強化（60%〜95%） ---
+                    # --- 裾ゾーン強化（60%〜80%） ---
                     hem0 = int(y0 + bbox_h * 0.60)
                     hem1 = int(y0 + bbox_h * 0.80)
                     hem0 = max(0, min(H - 1, hem0))
@@ -274,9 +273,13 @@ def main():
     top_resized = cv2.resize(top_f, (target_w, target_h), interpolation=interp)
     top_rot_f = rotate_rgba_premult(top_resized, float(args.angle))
 
+    # ★ divide-by-zero warning を出さない unpremultiply
     a2 = top_rot_f[:, :, 3:4] / 255.0
     eps = 1e-6
-    top_rot_f[:, :, :3] = np.where(a2 > eps, top_rot_f[:, :, :3] / a2, 0.0)
+    rgb = top_rot_f[:, :, :3]
+    out_rgb = np.zeros_like(rgb)
+    np.divide(rgb, a2, out=out_rgb, where=(a2 > eps))
+    top_rot_f[:, :, :3] = out_rgb
 
     # 仕上げ：alphaを少しだけ縮めて境界をきれいに
     alpha_u8 = np.clip(top_rot_f[:, :, 3], 0, 255).astype(np.uint8)
@@ -287,7 +290,7 @@ def main():
 
     top_rot = np.clip(top_rot_f, 0, 255).astype(np.uint8)
 
-    # --- bbox基準で配置（bbがある方＝alphaの有効範囲が取れてる） ---
+    # --- bbox基準で配置 ---
     th, tw = top_rot.shape[:2]
     bb = alpha_bbox(top_rot, thr=10)
 

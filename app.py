@@ -1,17 +1,20 @@
-from rembg import remove
-from rembg.session_factory import new_session
-
-REMBG_SESSION = new_session("u2net")  # or "u2netp" (軽量)
-
 import io
 import os
-import subprocess
 import sys
 import hashlib
+import subprocess
 
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
+
 from rembg import remove
+from rembg.session_factory import new_session
+
+
+# =========================
+# Streamlit config (MUST be first st.* call)
+# =========================
+st.set_page_config(page_title="WearSnap", layout="wide")
 
 
 # =========================
@@ -26,13 +29,26 @@ AUTO_TOP_PATH = "assets/uploaded_top_rgba.png"
 
 
 # =========================
+# rembg session (cache)
+# =========================
+@st.cache_resource
+def get_rembg_session():
+    # u2netp の方が軽いけど品質はu2netが安定。まずはu2netで固定。
+    return new_session("u2net")
+
+
+# =========================
 # Session init
 # =========================
 if "boot_done" not in st.session_state:
     st.session_state.boot_done = True
     st.session_state.has_generated = False
+    # 初回起動時に前回の出力を消す（任意）
     if os.path.exists(OUT_FINAL):
-        os.remove(OUT_FINAL)
+        try:
+            os.remove(OUT_FINAL)
+        except Exception:
+            pass
 
 if "top_sig" not in st.session_state:
     st.session_state.top_sig = None
@@ -106,13 +122,13 @@ def auto_rgba_with_rembg(uploaded_bytes: bytes, out_path: str):
     """アップロード画像bytes → rembgで透過PNG(RGBA)にして保存"""
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
-    # ✅ PILで開けるか確認
+    # PILで開けるか確認
     inp = Image.open(io.BytesIO(uploaded_bytes)).convert("RGBA")
 
-    # ✅ PNGファイルbytesにしてから remove() に渡す（これが正解）
+    # PNG bytes にしてから remove() に渡す（これが安定）
     buf = io.BytesIO()
     inp.save(buf, format="PNG")
-    out_bytes = remove(buf.getvalue(), session=REMBG_SESSION)
+    out_bytes = remove(buf.getvalue(), session=get_rembg_session())
 
     out = Image.open(io.BytesIO(out_bytes)).convert("RGBA")
     out.save(out_path)
@@ -245,8 +261,6 @@ def do_generate(
 # =========================
 # UI
 # =========================
-st.set_page_config(page_title="WearSnap", layout="wide")
-
 st.title("👕 WearSnap")
 st.caption("写真1枚で、服の試着イメージをすぐ確認")
 
@@ -281,7 +295,7 @@ if person_upload is not None:
         # 人物マスクRGBA（首推定/下地化用）
         buf = io.BytesIO()
         img.convert("RGBA").save(buf, format="PNG")
-        out_bytes = remove(buf.getvalue())
+        out_bytes = remove(buf.getvalue(), session=get_rembg_session())
         Image.open(io.BytesIO(out_bytes)).convert("RGBA").save(PERSON_RGBA)
         person_rgba_path = PERSON_RGBA
 
@@ -289,6 +303,10 @@ if person_upload is not None:
 
     except UnidentifiedImageError:
         st.error("人物写真が読み込めません（JPEG/PNGで再アップロード。HEIC不可）")
+        person_path = None
+        person_rgba_path = None
+    except Exception as e:
+        st.error(f"人物写真の処理でエラー: {e}")
         person_path = None
         person_rgba_path = None
 
@@ -303,18 +321,29 @@ top_upload = st.file_uploader(
 )
 
 if top_upload is not None:
-    raw = top_upload.getvalue()
-    sig = hashlib.md5(raw).hexdigest()
+    try:
+        raw = top_upload.getvalue()
+        sig = hashlib.md5(raw).hexdigest()
 
-    if sig != st.session_state.top_sig:
-        st.session_state.top_sig = sig
-        st.session_state.top_path = auto_rgba_with_rembg(raw, AUTO_TOP_PATH)
+        if sig != st.session_state.top_sig:
+            st.session_state.top_sig = sig
+            st.session_state.top_path = auto_rgba_with_rembg(raw, AUTO_TOP_PATH)
 
-        st.session_state.has_generated = False
-        if os.path.exists(OUT_FINAL):
-            os.remove(OUT_FINAL)
+            st.session_state.has_generated = False
+            if os.path.exists(OUT_FINAL):
+                try:
+                    os.remove(OUT_FINAL)
+                except Exception:
+                    pass
 
-        st.success("服の背景を自動で透過しました ✅")
+            st.success("服の背景を自動で透過しました ✅")
+
+    except UnidentifiedImageError:
+        st.error("服画像が読み込めません（JPEG/PNGで再アップロード。HEIC不可）")
+        st.session_state.top_path = None
+    except Exception as e:
+        st.error(f"服画像の透過処理でエラー: {e}")
+        st.session_state.top_path = None
 
 top_path = st.session_state.top_path
 
@@ -344,10 +373,7 @@ auto_fit = st.checkbox("自動位置合わせ（おすすめ）", value=True)
 
 with st.expander("微調整（上級者向け）", expanded=False):
     cx = st.slider("cx（中心X）", 0.00, 1.00, 0.50, 0.01)
-
-    # ★ 首基準：首から下へ（H比）
     y = st.slider("y（首から下へ）", 0.00, 0.40, 0.10, 0.01)
-
     w = st.slider("w（幅）", 0.50, 1.25, 0.90, 0.01)
     angle = st.slider("angle（回転）", -10.0, 10.0, -1.5, 0.5)
     alpha = st.slider("alpha（透過）", 0.10, 1.00, 1.00, 0.01)
@@ -415,7 +441,7 @@ if gen_btn:
 
         # ★AUTOでデカくなりすぎるのも防ぐ（上限）
         if not is_child:
-            w_use = min(w_use, 1.06)   # 大人
+            w_use = min(w_use, 1.06)   # 大人（まずはここで蓋）
         else:
             w_use = min(w_use, 1.02)   # 子供
 
