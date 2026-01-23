@@ -56,24 +56,22 @@ if "top_path" not in st.session_state:
 def apply_watermark_any(
     path: str,
     text: str = "WearSnap",
-    opacity_pct: float = 0.22,   # 0.16だと薄いことがあるので少し濃く
+    opacity_pct: float = 0.16,
     angle: float = 18.0,
 ):
-    """PNG/JPG両対応：白文字+黒縁取りの透かし（明るい背景でも見える）"""
+    """PNG/JPG両対応：オシャレ系の「1〜2箇所だけ」透かし"""
     if not os.path.exists(path):
         return
 
     img = Image.open(path).convert("RGBA")
     W, H = img.size
 
-    # 画像サイズに応じてフォントを決める
-    font_size = max(26, int(min(W, H) * 0.10))
+    font_size = max(28, int(min(W, H) * 0.10))
 
-    # フォント選択
     font = None
     candidates = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",  # Streamlit Cloud
-        "/System/Library/Fonts/SFNS.ttf",                   # macOS
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/System/Library/Fonts/SFNS.ttf",
         "Arial.ttf",
     ]
     for fp in candidates:
@@ -88,7 +86,10 @@ def apply_watermark_any(
     overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
-    # 文字サイズ計測
+    # ★ fill を必ずここで定義（UnboundLocalError対策）
+    alpha = int(255 * max(0.0, min(1.0, float(opacity_pct))))
+    fill = (0, 0, 0, alpha)
+
     try:
         bbox = draw.textbbox((0, 0), text, font=font)
         tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
@@ -97,35 +98,18 @@ def apply_watermark_any(
 
     margin = int(min(W, H) * 0.04)
 
-    # ✅ positions を必ずここで定義（NameError回避）
+    # ★ positions も必ずここで定義（NameError対策）
     positions = [
-        (margin, margin),                      # 左上
-        (W - tw - margin, H - th - margin),    # 右下
+        (margin, margin),
+        (W - tw - margin, H - th - margin),
     ]
 
-    # 白文字 + 黒縁取り（明るい背景でも確実に見える）
-    alpha = int(255 * max(0.0, min(1.0, opacity_pct)))
-    fill = (255, 255, 255, alpha)                 # 白
-    stroke = (0, 0, 0, int(alpha * 0.85))          # 黒縁
-    stroke_width = max(2, int(font_size * 0.06))   # だいたい2〜6pxくらい
-
     for (x, y) in positions:
-        # 縁取り
-        try:
-            draw.text((x, y), text, font=font, fill=fill,
-                      stroke_width=stroke_width, stroke_fill=stroke)
-        except TypeError:
-            # 古いPillow対策（strokeが使えない場合）
-            for dx in (-1, 0, 1):
-                for dy in (-1, 0, 1):
-                    draw.text((x + dx, y + dy), text, font=font, fill=stroke)
-            draw.text((x, y), text, font=font, fill=fill)
+        draw.text((x, y), text, font=font, fill=fill)
 
-    # 回転して合成
     overlay = overlay.rotate(angle, resample=Image.BICUBIC, expand=False)
     out = Image.alpha_composite(img, overlay)
 
-    # 保存（PNG/JPG両対応）
     if path.lower().endswith(".png"):
         out.save(path, format="PNG")
     else:
