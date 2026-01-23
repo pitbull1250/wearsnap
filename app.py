@@ -1,3 +1,8 @@
+from rembg import remove
+from rembg.session_factory import new_session
+
+REMBG_SESSION = new_session("u2net")  # or "u2netp" (軽量)
+
 import io
 import os
 import subprocess
@@ -107,7 +112,7 @@ def auto_rgba_with_rembg(uploaded_bytes: bytes, out_path: str):
     # ✅ PNGファイルbytesにしてから remove() に渡す（これが正解）
     buf = io.BytesIO()
     inp.save(buf, format="PNG")
-    out_bytes = remove(buf.getvalue())
+    out_bytes = remove(buf.getvalue(), session=REMBG_SESSION)
 
     out = Image.open(io.BytesIO(out_bytes)).convert("RGBA")
     out.save(out_path)
