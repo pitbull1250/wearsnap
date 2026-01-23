@@ -10,12 +10,15 @@ from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
 from rembg import remove
 from rembg.session_factory import new_session
 
-
 # =========================
 # Streamlit config (MUST be first st.* call)
 # =========================
 st.set_page_config(page_title="WearSnap", layout="wide")
 
+# =========================
+# rembg session (stable on Streamlit Cloud)
+# =========================
+REMBG_SESSION = new_session("u2net")  # or "u2netp" (lighter)
 
 # =========================
 # Paths
@@ -27,23 +30,14 @@ PERSON_RGBA = "assets/uploaded_person_rgba.png"
 
 AUTO_TOP_PATH = "assets/uploaded_top_rgba.png"
 
-
-# =========================
-# rembg session (cache)
-# =========================
-@st.cache_resource
-def get_rembg_session():
-    # u2netp の方が軽いけど品質はu2netが安定。まずはu2netで固定。
-    return new_session("u2net")
-
-
 # =========================
 # Session init
 # =========================
 if "boot_done" not in st.session_state:
     st.session_state.boot_done = True
     st.session_state.has_generated = False
-    # 初回起動時に前回の出力を消す（任意）
+
+    # 起動時は前回の生成結果を表示しない
     if os.path.exists(OUT_FINAL):
         try:
             os.remove(OUT_FINAL)
@@ -62,22 +56,24 @@ if "top_path" not in st.session_state:
 def apply_watermark_any(
     path: str,
     text: str = "WearSnap",
-    opacity_pct: float = 0.16,
+    opacity_pct: float = 0.22,   # 0.16だと薄いことがあるので少し濃く
     angle: float = 18.0,
 ):
-    """PNG/JPG両対応：オシャレ系の「1〜2箇所だけ」透かし"""
+    """PNG/JPG両対応：白文字+黒縁取りの透かし（明るい背景でも見える）"""
     if not os.path.exists(path):
         return
 
     img = Image.open(path).convert("RGBA")
     W, H = img.size
 
-    font_size = max(28, int(min(W, H) * 0.10))
+    # 画像サイズに応じてフォントを決める
+    font_size = max(26, int(min(W, H) * 0.10))
 
+    # フォント選択
     font = None
     candidates = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/System/Library/Fonts/SFNS.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",  # Streamlit Cloud
+        "/System/Library/Fonts/SFNS.ttf",                   # macOS
         "Arial.ttf",
     ]
     for fp in candidates:
@@ -92,9 +88,7 @@ def apply_watermark_any(
     overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
-    alpha = int(255 * max(0.0, min(1.0, opacity_pct)))
-    fill = (0, 0, 0, alpha)
-
+    # 文字サイズ計測
     try:
         bbox = draw.textbbox((0, 0), text, font=font)
         tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
@@ -102,33 +96,52 @@ def apply_watermark_any(
         tw, th = draw.textsize(text, font=font)
 
     margin = int(min(W, H) * 0.04)
-    positions = [
-        (margin, margin),
-        (W - tw - margin, H - th - margin),
-    ]
-    for (x, y) in positions:
-        draw.text((x, y), text, font=font, fill=fill)
 
+    # ✅ positions を必ずここで定義（NameError回避）
+    positions = [
+        (margin, margin),                      # 左上
+        (W - tw - margin, H - th - margin),    # 右下
+    ]
+
+    # 白文字 + 黒縁取り（明るい背景でも確実に見える）
+    alpha = int(255 * max(0.0, min(1.0, opacity_pct)))
+    fill = (255, 255, 255, alpha)                 # 白
+    stroke = (0, 0, 0, int(alpha * 0.85))          # 黒縁
+    stroke_width = max(2, int(font_size * 0.06))   # だいたい2〜6pxくらい
+
+    for (x, y) in positions:
+        # 縁取り
+        try:
+            draw.text((x, y), text, font=font, fill=fill,
+                      stroke_width=stroke_width, stroke_fill=stroke)
+        except TypeError:
+            # 古いPillow対策（strokeが使えない場合）
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    draw.text((x + dx, y + dy), text, font=font, fill=stroke)
+            draw.text((x, y), text, font=font, fill=fill)
+
+    # 回転して合成
     overlay = overlay.rotate(angle, resample=Image.BICUBIC, expand=False)
     out = Image.alpha_composite(img, overlay)
 
+    # 保存（PNG/JPG両対応）
     if path.lower().endswith(".png"):
         out.save(path, format="PNG")
     else:
         out.convert("RGB").save(path, format="JPEG", quality=95)
 
-
 def auto_rgba_with_rembg(uploaded_bytes: bytes, out_path: str):
-    """アップロード画像bytes → rembgで透過PNG(RGBA)にして保存"""
+    """アップロード画像bytes → rembgで透過PNG(RGBA)にして保存（session固定で安定）"""
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
     # PILで開けるか確認
     inp = Image.open(io.BytesIO(uploaded_bytes)).convert("RGBA")
 
-    # PNG bytes にしてから remove() に渡す（これが安定）
+    # PNG bytesにして remove()（session指定で安定）
     buf = io.BytesIO()
     inp.save(buf, format="PNG")
-    out_bytes = remove(buf.getvalue(), session=get_rembg_session())
+    out_bytes = remove(buf.getvalue(), session=REMBG_SESSION)
 
     out = Image.open(io.BytesIO(out_bytes)).convert("RGBA")
     out.save(out_path)
@@ -209,6 +222,8 @@ def estimate_cx_w_from_mask(person_rgba_path: str):
         x0, x1 = int(xs2.min()), int(xs2.max())
 
     cx = ((x0 + x1) / 2) / float(W)
+
+    # ★ AUTO推定：過大になりにくい係数（まずは 1.10）
     w = ((x1 - x0 + 1) / float(W)) * 1.10
 
     cx = float(max(0.0, min(1.0, cx)))
@@ -250,9 +265,9 @@ def do_generate(
 
         if is_free:
             apply_watermark_any(out_path)
-            st.sidebar.warning("WATERMARK APPLIED ✅")
+            st.info("無料プラン：透かしを適用しました ✅")
         else:
-            st.sidebar.success("NO WATERMARK (PAID)")
+            st.info("有料プラン：透かしなし ✅")
 
         st.success(f"Saved: {out_path}")
         return rc
@@ -292,10 +307,10 @@ if person_upload is not None:
         img.save(PERSON_RGB, quality=95)
         person_path = PERSON_RGB
 
-        # 人物マスクRGBA（首推定/下地化用）
+        # 人物マスクRGBA（首推定/下地化用）※ session固定
         buf = io.BytesIO()
         img.convert("RGBA").save(buf, format="PNG")
-        out_bytes = remove(buf.getvalue(), session=get_rembg_session())
+        out_bytes = remove(buf.getvalue(), session=REMBG_SESSION)
         Image.open(io.BytesIO(out_bytes)).convert("RGBA").save(PERSON_RGBA)
         person_rgba_path = PERSON_RGBA
 
@@ -342,7 +357,7 @@ if top_upload is not None:
         st.error("服画像が読み込めません（JPEG/PNGで再アップロード。HEIC不可）")
         st.session_state.top_path = None
     except Exception as e:
-        st.error(f"服画像の透過処理でエラー: {e}")
+        st.error(f"服画像の処理でエラー: {e}")
         st.session_state.top_path = None
 
 top_path = st.session_state.top_path
@@ -373,7 +388,10 @@ auto_fit = st.checkbox("自動位置合わせ（おすすめ）", value=True)
 
 with st.expander("微調整（上級者向け）", expanded=False):
     cx = st.slider("cx（中心X）", 0.00, 1.00, 0.50, 0.01)
+
+    # 首基準：首から下へ（H比）
     y = st.slider("y（首から下へ）", 0.00, 0.40, 0.10, 0.01)
+
     w = st.slider("w（幅）", 0.50, 1.25, 0.90, 0.01)
     angle = st.slider("angle（回転）", -10.0, 10.0, -1.5, 0.5)
     alpha = st.slider("alpha（透過）", 0.10, 1.00, 1.00, 0.01)
@@ -435,21 +453,21 @@ if gen_btn:
 
         # ★AUTOで小さくなりすぎるのを防ぐ（下限）
         if not is_child:
-            w_use = max(w_use, 1.00)   # 大人
+            w_use = max(w_use, 1.00)
         else:
-            w_use = max(w_use, 0.98)   # 子供
+            w_use = max(w_use, 0.98)
 
         # ★AUTOでデカくなりすぎるのも防ぐ（上限）
         if not is_child:
-            w_use = min(w_use, 1.06)   # 大人（まずはここで蓋）
+            w_use = min(w_use, 1.06)
         else:
-            w_use = min(w_use, 1.02)   # 子供
+            w_use = min(w_use, 1.02)
 
     else:
         cx_use, y_use, w_use = cx, y, w
         last_mode = "MANUAL"
 
-    # 体型モード補正（軽め）
+    # 体型モード補正（軽め）※ A版は補正を弱く（ズレの原因になりやすいので）
     if is_child:
         y_use = min(0.40, max(0.06, y_use + 0.02))
         w_use = min(1.25, w_use + 0.02)
