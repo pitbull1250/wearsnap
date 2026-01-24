@@ -203,6 +203,7 @@ def main():
                 t0 = int(y0 + bbox_h * 0.25)
                 t1 = int(y0 + bbox_h * 0.75)
 
+                # 念のためクリップ
                 t0 = max(0, min(H - 1, t0))
                 t1 = max(0, min(H, t1))
                 if t1 > t0:
@@ -273,13 +274,9 @@ def main():
     top_resized = cv2.resize(top_f, (target_w, target_h), interpolation=interp)
     top_rot_f = rotate_rgba_premult(top_resized, float(args.angle))
 
-    # ★ divide-by-zero warning を出さない unpremultiply
     a2 = top_rot_f[:, :, 3:4] / 255.0
     eps = 1e-6
-    rgb = top_rot_f[:, :, :3]
-    out_rgb = np.zeros_like(rgb)
-    np.divide(rgb, a2, out=out_rgb, where=(a2 > eps))
-    top_rot_f[:, :, :3] = out_rgb
+    top_rot_f[:, :, :3] = np.where(a2 > eps, top_rot_f[:, :, :3] / a2, 0.0)
 
     # 仕上げ：alphaを少しだけ縮めて境界をきれいに
     alpha_u8 = np.clip(top_rot_f[:, :, 3], 0, 255).astype(np.uint8)
@@ -290,12 +287,12 @@ def main():
 
     top_rot = np.clip(top_rot_f, 0, 255).astype(np.uint8)
 
-    # --- bbox基準で配置 ---
+    # --- bbox基準で配置（bbがある方＝alphaの有効範囲が取れてる） ---
     th, tw = top_rot.shape[:2]
     bb = alpha_bbox(top_rot, thr=10)
 
     # ★襟位置補正：鎖骨に落ちやすいのを「少し上げる」
-    collar_lift = int(H * 0.015)  # 1.5%H 上げ（必要なら 0.010〜0.025）
+    collar_lift = int(H * 0.015)  # 1.5%H 上げ
 
     if bb is None:
         x = int(W * float(args.cx) - tw / 2)
