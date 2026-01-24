@@ -269,9 +269,13 @@ def do_generate(
             st.error("生成に失敗しました。エラーを確認してください。")
             return rc
 
-        if is_free:
+    if is_free:
+        try:
             apply_watermark_any(out_path)
-            st.sidebar.warning("無料プラン：透かしを適用しました ✅")
+            st.sidebar.warning("WATERMARK APPLIED ✅")
+        except Exception as e:
+            st.sidebar.error("⚠️ 透かし適用で失敗（ただし生成は継続）")
+            st.exception(e)
         else:
             st.sidebar.success("有料プラン：透かしなし ✅")
 
@@ -441,45 +445,47 @@ with col2:
 # Action
 # -------------------------
 if gen_btn:
-    if auto_fit and person_rgba_path and os.path.exists(person_rgba_path):
-        cx_use, w_use = estimate_cx_w_from_mask(person_rgba_path)
-        y_use = y
-        last_mode = "AUTO"
+    try:
+        if auto_fit and person_rgba_path and os.path.exists(person_rgba_path):
+            cx_use, w_use = estimate_cx_w_from_mask(person_rgba_path)
+            y_use = y
+            last_mode = "AUTO"
 
-        # 大人/子供の幅ガード（※子供の最適化はデプロイ後にやる）
-        if not is_child:
-            w_use = max(w_use, 1.00)
-            w_use = min(w_use, 1.06)
+            if not is_child:
+                w_use = max(w_use, 1.00)
+                w_use = min(w_use, 1.06)
+            else:
+                w_use = max(w_use, 0.98)
+                w_use = min(w_use, 1.02)
         else:
-            w_use = max(w_use, 0.98)
-            w_use = min(w_use, 1.02)
+            cx_use, y_use, w_use = cx, y, w
+            last_mode = "MANUAL"
 
-    else:
-        cx_use, y_use, w_use = cx, y, w
-        last_mode = "MANUAL"
+        if is_child:
+            y_use = min(0.40, max(0.06, y_use + 0.02))
+            w_use = min(1.25, w_use + 0.02)
+        else:
+            y_use = min(0.40, max(0.04, y_use - 0.02))
+            w_use = min(1.25, w_use + 0.03)
 
-    # 体型モード補正（軽め）
-    if is_child:
-        y_use = min(0.40, max(0.06, y_use + 0.02))
-        w_use = min(1.25, w_use + 0.02)
-    else:
-        y_use = min(0.40, max(0.04, y_use - 0.02))
-        w_use = min(1.25, w_use + 0.03)
+        rc = do_generate(
+            out_path=OUT_FINAL,
+            label=f"生成中（{last_mode}）",
+            person_path=person_path,
+            top_path=top_path,
+            person_rgba_path=person_rgba_path,
+            cx_in=cx_use,
+            y_in=y_use,
+            w_in=w_use,
+            angle_in=angle,
+            alpha_in=alpha,
+            is_free=is_free,
+        )
 
-    rc = do_generate(
-        out_path=OUT_FINAL,
-        label=f"生成中（{last_mode}）",
-        person_path=person_path,
-        top_path=top_path,
-        person_rgba_path=person_rgba_path,
-        cx_in=cx_use,
-        y_in=y_use,
-        w_in=w_use,
-        angle_in=angle,
-        alpha_in=alpha,
-        is_free=is_free,
-    )
+        st.session_state.has_generated = (rc == 0)
+        if rc == 0:
+            st.rerun()
 
-    st.session_state.has_generated = (rc == 0)
-    if rc == 0:
-        st.rerun()
+    except Exception as e:
+        st.error("💥 試着処理で例外が発生しました（ここに原因が出ます）")
+        st.exception(e)  # ← これでTracebackが画面に出る
