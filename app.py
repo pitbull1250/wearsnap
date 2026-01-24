@@ -18,9 +18,9 @@ st.set_page_config(page_title="WearSnap", layout="wide")
 
 
 # =========================
-# rembg session (stability + faster on Cloud)
+# rembg session（高速化＆安定）
 # =========================
-REMBG_SESSION = new_session("u2net")  # or "u2netp"
+REMBG_SESSION = new_session("u2net")  # or "u2netp" (軽量)
 
 
 # =========================
@@ -30,7 +30,6 @@ OUT_FINAL = "outputs/tryon_top_final.jpg"
 
 PERSON_RGB = "assets/uploaded_person.jpg"
 PERSON_RGBA = "assets/uploaded_person_rgba.png"
-
 AUTO_TOP_PATH = "assets/uploaded_top_rgba.png"
 
 
@@ -114,8 +113,14 @@ def apply_watermark_any(
     for (x, y) in positions:
         # 縁取り
         try:
-            draw.text((x, y), text, font=font, fill=fill,
-                      stroke_width=stroke_width, stroke_fill=stroke)
+            draw.text(
+                (x, y),
+                text,
+                font=font,
+                fill=fill,
+                stroke_width=stroke_width,
+                stroke_fill=stroke,
+            )
         except TypeError:
             # 古いPillow対策（strokeが使えない場合）
             for dx in (-1, 0, 1):
@@ -138,14 +143,14 @@ def auto_rgba_with_rembg(uploaded_bytes: bytes, out_path: str):
     """アップロード画像bytes → rembgで透過PNG(RGBA)にして保存"""
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
-    # PILで開けるか確認
+    # ✅ PILで開けるか確認
     inp = Image.open(io.BytesIO(uploaded_bytes)).convert("RGBA")
 
-    # PNG bytesにしてから remove() に渡す（安定）
+    # ✅ PNG bytesにしてから remove()
     buf = io.BytesIO()
     inp.save(buf, format="PNG")
-
     out_bytes = remove(buf.getvalue(), session=REMBG_SESSION)
+
     out = Image.open(io.BytesIO(out_bytes)).convert("RGBA")
     out.save(out_path)
     return out_path
@@ -169,7 +174,7 @@ def run_tryon(
         "--person", person_path,
         "--top", top_path,
         "--cx", f"{cx:.4f}",
-        "--y", f"{y:.4f}",   # 首から下へ（H比）
+        "--y", f"{y:.4f}",
         "--w", f"{w:.4f}",
         "--angle", f"{angle:.4f}",
         "--alpha", f"{alpha:.4f}",
@@ -225,8 +230,6 @@ def estimate_cx_w_from_mask(person_rgba_path: str):
         x0, x1 = int(xs2.min()), int(xs2.max())
 
     cx = ((x0 + x1) / 2) / float(W)
-
-    # ここが “幅の係数”
     w = ((x1 - x0 + 1) / float(W)) * 1.10
 
     cx = float(max(0.0, min(1.0, cx)))
@@ -324,7 +327,7 @@ if person_upload is not None:
         person_path = None
         person_rgba_path = None
     except Exception as e:
-        st.error(f"人物処理でエラー: {e}")
+        st.error(f"人物写真処理でエラー: {e}")
         person_path = None
         person_rgba_path = None
 
@@ -344,20 +347,16 @@ if top_upload is not None:
 
     if sig != st.session_state.top_sig:
         st.session_state.top_sig = sig
-        try:
-            st.session_state.top_path = auto_rgba_with_rembg(raw, AUTO_TOP_PATH)
+        st.session_state.top_path = auto_rgba_with_rembg(raw, AUTO_TOP_PATH)
 
-            st.session_state.has_generated = False
-            if os.path.exists(OUT_FINAL):
-                try:
-                    os.remove(OUT_FINAL)
-                except Exception:
-                    pass
+        st.session_state.has_generated = False
+        if os.path.exists(OUT_FINAL):
+            try:
+                os.remove(OUT_FINAL)
+            except Exception:
+                pass
 
-            st.success("服の背景を自動で透過しました ✅")
-        except Exception as e:
-            st.error(f"服の透過でエラー: {e}")
-            st.session_state.top_path = None
+        st.success("服の背景を自動で透過しました ✅")
 
 top_path = st.session_state.top_path
 
@@ -387,10 +386,7 @@ auto_fit = st.checkbox("自動位置合わせ（おすすめ）", value=True)
 
 with st.expander("微調整（上級者向け）", expanded=False):
     cx = st.slider("cx（中心X）", 0.00, 1.00, 0.50, 0.01)
-
-    # ★ 首基準：首から下へ（H比）
     y = st.slider("y（首から下へ）", 0.00, 0.40, 0.10, 0.01)
-
     w = st.slider("w（幅）", 0.50, 1.25, 0.90, 0.01)
     angle = st.slider("angle（回転）", -10.0, 10.0, -1.5, 0.5)
     alpha = st.slider("alpha（透過）", 0.10, 1.00, 1.00, 0.01)
@@ -450,18 +446,13 @@ if gen_btn:
         y_use = y
         last_mode = "AUTO"
 
-        # ★AUTOで小さくなりすぎるのを防ぐ（下限）
+        # 大人/子供の幅ガード（※子供の最適化はデプロイ後にやる）
         if not is_child:
-            w_use = max(w_use, 1.00)   # 大人
+            w_use = max(w_use, 1.00)
+            w_use = min(w_use, 1.06)
         else:
-            w_use = max(w_use, 0.98)   # 子供
-
-        # ★AUTOでデカくなりすぎるのも防ぐ（上限）
-        # ※ 子供が大きすぎ問題は「この上限」が効く
-        if not is_child:
-            w_use = min(w_use, 1.06)   # 大人
-        else:
-            w_use = min(w_use, 1.02)   # 子供
+            w_use = max(w_use, 0.98)
+            w_use = min(w_use, 1.02)
 
     else:
         cx_use, y_use, w_use = cx, y, w
