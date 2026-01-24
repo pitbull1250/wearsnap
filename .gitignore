@@ -20,3 +20,8 @@ step*_test.py
 # Old experimental scripts
 step3_overlay.py
 step_pants_*.py
+app_*backup*.py
+app_*_backup.py
+app_before_*.py
+step_top_overlay_*backup*.py
+step_top_overlay_before_*.py
