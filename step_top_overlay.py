@@ -1,5 +1,7 @@
+# step_top_overlay.py
 import argparse
 import os
+
 import cv2
 import numpy as np
 
@@ -83,13 +85,17 @@ def rotate_rgba_premult(top_rgba_premult_f32, angle_deg):
     a_u8 = np.clip(top_rgba_premult_f32[:, :, 3], 0, 255).astype(np.uint8)
 
     rgb_rot = cv2.warpAffine(
-        rgb_p, M, (new_w, new_h),
+        rgb_p,
+        M,
+        (new_w, new_h),
         flags=cv2.INTER_LINEAR,
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=(0, 0, 0),
     )
     a_rot = cv2.warpAffine(
-        a_u8, M, (new_w, new_h),
+        a_u8,
+        M,
+        (new_w, new_h),
         flags=cv2.INTER_LINEAR,
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=0,
@@ -154,16 +160,16 @@ def main():
     p.add_argument("--person", default="assets/person.jpg")
     p.add_argument("--top", default="assets/top_rgba.png")
     p.add_argument("--cx", type=float, default=0.50, help="中心X (0..1)")
-
-    # ✅ 首基準：首から下へどれくらい下げるか（H比）
     p.add_argument("--y", type=float, default=0.10, help="首から下へのYオフセット（H比）例:0.06〜0.12")
-
     p.add_argument("--w", type=float, default=1.00, help="幅（人物比）")
     p.add_argument("--angle", type=float, default=0.0)
     p.add_argument("--alpha", type=float, default=1.0)
     p.add_argument("--out", default="outputs/tryon_tmp.jpg")
     p.add_argument("--person_rgba", default=None)
+    p.add_argument("--is_child", action="store_true")
     args = p.parse_args()
+
+    is_child = bool(args.is_child)
 
     person = cv2.imread(args.person, cv2.IMREAD_COLOR)
     if person is None:
@@ -180,11 +186,16 @@ def main():
             if mask_u8 is not None:
                 neck_y = estimate_neck_y_from_mask(mask_u8)
 
-    # 推定クリップ（下すぎると顎に被りやすい / 上すぎると不自然）
+    # 推定クリップ
     neck_y = min(neck_y, int(H * 0.24))
     neck_y = max(neck_y, int(H * 0.12))
-
     print("DEBUG neck_y(px) =", neck_y, "/ H =", H, "=> ratio =", round(neck_y / H, 3))
+
+    # ✅ collar_lift（子供は弱める：上唇事故を止血）
+    if is_child:
+        collar_lift = int(H * 0.005)  # 子供：0.5%
+    else:
+        collar_lift = int(H * 0.015)  # 大人：1.5%
 
     # --- 胴体だけ「元の服を消す（下地化）」処理（rembgマスク使用） ---
     if args.person_rgba and os.path.exists(args.person_rgba):
@@ -199,9 +210,13 @@ def main():
                 x0, x1 = int(xs.min()), int(xs.max())
                 bbox_h = max(1, (y1 - y0 + 1))
 
-                # 胴体帯（25%〜75%）
-                t0 = int(y0 + bbox_h * 0.25)
-                t1 = int(y0 + bbox_h * 0.75)
+                # ✅ 子供は顔を絶対に触らない帯にする（口元変色を止血）
+                if is_child:
+                    t0 = int(y0 + bbox_h * 0.35)
+                    t1 = int(y0 + bbox_h * 0.65)
+                else:
+                    t0 = int(y0 + bbox_h * 0.25)
+                    t1 = int(y0 + bbox_h * 0.75)
 
                 # 念のためクリップ
                 t0 = max(0, min(H - 1, t0))
@@ -227,9 +242,14 @@ def main():
                     person_f = person.astype(np.float32)
                     person = (person_f * (1.0 - m3) + neutral_f * m3).astype(np.uint8)
 
-                    # --- 裾ゾーン強化（60%〜80%） ---
-                    hem0 = int(y0 + bbox_h * 0.60)
-                    hem1 = int(y0 + bbox_h * 0.80)
+                    # ✅ 裾ゾーン強化（膝までぼやける対策：子供は範囲を上寄せ）
+                    if is_child:
+                        hem0 = int(y0 + bbox_h * 0.55)
+                        hem1 = int(y0 + bbox_h * 0.68)
+                    else:
+                        hem0 = int(y0 + bbox_h * 0.60)
+                        hem1 = int(y0 + bbox_h * 0.80)
+
                     hem0 = max(0, min(H - 1, hem0))
                     hem1 = max(0, min(H, hem1))
 
@@ -274,20 +294,9 @@ def main():
     top_resized = cv2.resize(top_f, (target_w, target_h), interpolation=interp)
     top_rot_f = rotate_rgba_premult(top_resized, float(args.angle))
 
-    # ✅ np.where の「両方評価」で警告が出るのを回避（安全なunpremultiply）
-    # ✅ 安全なunpremultiply（shape事故回避）
-    a2 = top_rot_f[:, :, 3:4] / 255.0   # (h,w,1)
+    a2 = top_rot_f[:, :, 3:4] / 255.0
     eps = 1e-6
-
-    denom = a2.copy()
-    denom[denom <= eps] = 1.0           # 0除算回避
-
-    rgb = top_rot_f[:, :, :3] / denom   # (h,w,3) / (h,w,1) はOK（broadcastされる）
-
-    mask = (a2[:, :, 0] <= eps)         # (h,w) の2Dマスクにするのがポイント
-    rgb[mask] = 0.0                     # 行単位で3chまとめて0にできる
-
-    top_rot_f[:, :, :3] = rgb
+    top_rot_f[:, :, :3] = np.where(a2 > eps, top_rot_f[:, :, :3] / a2, 0.0)
 
     # 仕上げ：alphaを少しだけ縮めて境界をきれいに
     alpha_u8 = np.clip(top_rot_f[:, :, 3], 0, 255).astype(np.uint8)
@@ -298,12 +307,9 @@ def main():
 
     top_rot = np.clip(top_rot_f, 0, 255).astype(np.uint8)
 
-    # --- bbox基準で配置（bbがある方＝alphaの有効範囲が取れてる） ---
+    # --- bbox基準で配置 ---
     th, tw = top_rot.shape[:2]
     bb = alpha_bbox(top_rot, thr=10)
-
-    # ★襟位置補正：鎖骨に落ちやすいのを「少し上げる」
-    collar_lift = int(H * 0.015)  # 1.5%H 上げ（必要なら 0.010〜0.025）
 
     if bb is None:
         x = int(W * float(args.cx) - tw / 2)
@@ -311,15 +317,19 @@ def main():
     else:
         left, top_y, right, bottom = bb
         bb_cx = (left + right) / 2.0
+
+        # ✅ 上端(襟の立ち上がり)を少し無視して「襟基準」を下げる
+        collar_bias = int(th * 0.06)  # まず8%（効き弱ければ 0.10〜0.12 に上げる）
+
         x = int(W * float(args.cx) - bb_cx)
-        y = int(neck_y + H * float(args.y) - top_y - collar_lift)
+        y = int(neck_y + H * float(args.y) - top_y - collar_lift + collar_bias)
 
     comp = overlay_rgba(person, top_rot, x, y, alpha_scale=float(args.alpha))
 
     ensure_dir(args.out)
     cv2.imwrite(args.out, comp)
     print(f"Saved: {args.out}")
-    print(f"Params: cx={args.cx}, y={args.y}, w={args.w}, angle={args.angle}, alpha={args.alpha}")
+    print(f"Params: cx={args.cx}, y={args.y}, w={args.w}, angle={args.angle}, alpha={args.alpha}, is_child={is_child}")
 
 
 if __name__ == "__main__":

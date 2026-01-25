@@ -1,3 +1,4 @@
+# app.py
 import io
 import os
 import sys
@@ -16,12 +17,10 @@ from rembg.session_factory import new_session
 # =========================
 st.set_page_config(page_title="WearSnap", layout="wide")
 
-
 # =========================
-# rembg session (faster + stable)
+# Rembg session (global)
 # =========================
-REMBG_SESSION = new_session("u2net")  # or "u2netp" (軽量)
-
+REMBG_SESSION = new_session("u2net")  # or "u2netp" (light)
 
 # =========================
 # Paths
@@ -30,23 +29,7 @@ OUT_FINAL = "outputs/tryon_top_final.jpg"
 
 PERSON_RGB = "assets/uploaded_person.jpg"
 PERSON_RGBA = "assets/uploaded_person_rgba.png"
-
 AUTO_TOP_PATH = "assets/uploaded_top_rgba.png"
-
-
-# =========================
-# Cloud 安定化：入力画像を縮小（重すぎて落ちるのを防ぐ）
-# =========================
-MAX_SIDE = 1600  # Cloudではこれくらいが安定。ローカルでも問題なし。
-
-def downscale(img: Image.Image, max_side: int = MAX_SIDE) -> Image.Image:
-    w, h = img.size
-    m = max(w, h)
-    if m <= max_side:
-        return img
-    scale = max_side / float(m)
-    nw, nh = int(w * scale), int(h * scale)
-    return img.resize((nw, nh), Image.LANCZOS)
 
 
 # =========================
@@ -73,7 +56,7 @@ if "top_path" not in st.session_state:
 def apply_watermark_any(
     path: str,
     text: str = "WearSnap",
-    opacity_pct: float = 0.22,   # 0.16だと薄いことがあるので少し濃く
+    opacity_pct: float = 0.22,  # 少し濃く（薄すぎ防止）
     angle: float = 18.0,
 ):
     """PNG/JPG両対応：白文字+黒縁取りの透かし（明るい背景でも見える）"""
@@ -130,8 +113,12 @@ def apply_watermark_any(
         # 縁取り
         try:
             draw.text(
-                (x, y), text, font=font, fill=fill,
-                stroke_width=stroke_width, stroke_fill=stroke
+                (x, y),
+                text,
+                font=font,
+                fill=fill,
+                stroke_width=stroke_width,
+                stroke_fill=stroke,
             )
         except TypeError:
             # 古いPillow対策（strokeが使えない場合）
@@ -155,11 +142,9 @@ def auto_rgba_with_rembg(uploaded_bytes: bytes, out_path: str):
     """アップロード画像bytes → rembgで透過PNG(RGBA)にして保存"""
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
-    # ✅ PILで開けるか確認 + Cloud安定化の縮小
     inp = Image.open(io.BytesIO(uploaded_bytes)).convert("RGBA")
-    inp = downscale(inp)
 
-    # ✅ PNG bytesにして remove() に渡す
+    # PNG bytes にしてから rembg（安定）
     buf = io.BytesIO()
     inp.save(buf, format="PNG")
     out_bytes = remove(buf.getvalue(), session=REMBG_SESSION)
@@ -179,23 +164,37 @@ def run_tryon(
     alpha: float,
     out_path: str,
     person_rgba_path: str = None,
+    is_child: bool = False,
 ):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
     cmd = [
-        sys.executable, "step_top_overlay.py",
-        "--person", person_path,
-        "--top", top_path,
-        "--cx", f"{cx:.4f}",
-        "--y", f"{y:.4f}",   # 首から下へ（H比）
-        "--w", f"{w:.4f}",
-        "--angle", f"{angle:.4f}",
-        "--alpha", f"{alpha:.4f}",
-        "--out", out_path,
+        sys.executable,
+        "step_top_overlay.py",
+        "--person",
+        person_path,
+        "--top",
+        top_path,
+        "--cx",
+        f"{cx:.4f}",
+        "--y",
+        f"{y:.4f}",  # 首から下へ（H比）
+        "--w",
+        f"{w:.4f}",
+        "--angle",
+        f"{angle:.4f}",
+        "--alpha",
+        f"{alpha:.4f}",
+        "--out",
+        out_path,
     ]
 
     if person_rgba_path and os.path.exists(person_rgba_path):
         cmd += ["--person_rgba", person_rgba_path]
+
+    # ✅ 子供フラグ（step_top_overlay側で collar_lift / 下地帯 を分岐）
+    if is_child:
+        cmd += ["--is_child"]
 
     p = subprocess.run(cmd, capture_output=True, text=True)
     return p.returncode, p.stdout, p.stderr, " ".join(cmd)
@@ -262,15 +261,20 @@ def do_generate(
     angle_in: float,
     alpha_in: float,
     is_free: bool,
+    is_child: bool,
 ):
     with st.spinner(f"{label}..."):
         rc, out, err, cmdline = run_tryon(
-            person_path,
-            top_path,
-            cx_in, y_in, w_in,
-            angle_in, alpha_in,
-            out_path,
+            person_path=person_path,
+            top_path=top_path,
+            cx=cx_in,
+            y=y_in,
+            w=w_in,
+            angle=angle_in,
+            alpha=alpha_in,
+            out_path=out_path,
             person_rgba_path=person_rgba_path,
+            is_child=is_child,
         )
 
         with st.expander("🛠 実行ログ（デバッグ）", expanded=False):
@@ -282,17 +286,12 @@ def do_generate(
             st.error("生成に失敗しました。エラーを確認してください。")
             return rc
 
-        # ✅ 透かしは「例外で落ちない」ようにガード
         if is_free:
             try:
-                if os.path.exists(out_path):
-                    apply_watermark_any(out_path)
-                    st.sidebar.success("無料プラン：透かしを適用しました ✅")
-                else:
-                    st.sidebar.warning("透かし前に出力が見つかりませんでした")
+                apply_watermark_any(out_path)
+                st.sidebar.warning("無料プラン：透かしを適用しました ✅")
             except Exception as e:
-                st.sidebar.error("透かし処理でエラー（落ちないように継続）")
-                st.exception(e)
+                st.sidebar.error(f"透かしで例外: {e}")
         else:
             st.sidebar.success("有料プラン：透かしなし ✅")
 
@@ -311,7 +310,6 @@ plan = st.radio("無料 / 有料", ["無料（透かしあり）", "有料（透
 is_free = plan.startswith("無料")
 
 st.subheader("🧭 WearSnap：かんたん3ステップ")
-
 
 # -------------------------
 # Step 1) Person
@@ -332,7 +330,6 @@ if person_upload is not None:
         raw = person_upload.getvalue()
 
         img = Image.open(io.BytesIO(raw)).convert("RGB")
-        img = downscale(img)
         img.save(PERSON_RGB, quality=95)
         person_path = PERSON_RGB
 
@@ -350,11 +347,9 @@ if person_upload is not None:
         person_path = None
         person_rgba_path = None
     except Exception as e:
-        st.error("人物写真の処理でエラー")
-        st.exception(e)
+        st.error(f"人物写真の処理で例外: {e}")
         person_path = None
         person_rgba_path = None
-
 
 # -------------------------
 # Step 2) Top
@@ -367,32 +362,25 @@ top_upload = st.file_uploader(
 )
 
 if top_upload is not None:
-    try:
-        raw = top_upload.getvalue()
-        sig = hashlib.md5(raw).hexdigest()
+    raw = top_upload.getvalue()
+    sig = hashlib.md5(raw).hexdigest()
 
-        if sig != st.session_state.top_sig:
-            st.session_state.top_sig = sig
+    if sig != st.session_state.top_sig:
+        st.session_state.top_sig = sig
+        try:
             st.session_state.top_path = auto_rgba_with_rembg(raw, AUTO_TOP_PATH)
-
             st.session_state.has_generated = False
             if os.path.exists(OUT_FINAL):
                 try:
                     os.remove(OUT_FINAL)
                 except Exception:
                     pass
-
             st.success("服の背景を自動で透過しました ✅")
-    except UnidentifiedImageError:
-        st.error("服画像が読み込めません（JPEG/PNGで再アップロード。HEIC不可）")
-        st.session_state.top_path = None
-    except Exception as e:
-        st.error("服画像の透過処理でエラー")
-        st.exception(e)
-        st.session_state.top_path = None
+        except Exception as e:
+            st.error(f"服画像の透過で例外: {e}")
+            st.session_state.top_path = None
 
 top_path = st.session_state.top_path
-
 
 # -------------------------
 # Ready check
@@ -408,7 +396,6 @@ with c1:
 with c2:
     st.write("服：", "OK ✅" if ready_top else "未アップロード ❌")
 
-
 # -------------------------
 # Step 3) Settings + Run
 # -------------------------
@@ -422,7 +409,7 @@ auto_fit = st.checkbox("自動位置合わせ（おすすめ）", value=True)
 with st.expander("微調整（上級者向け）", expanded=False):
     cx = st.slider("cx（中心X）", 0.00, 1.00, 0.50, 0.01)
 
-    # ★ 首基準：首から下へ（H比）
+    # 首基準：首から下へ（H比）
     y = st.slider("y（首から下へ）", 0.00, 0.40, 0.10, 0.01)
 
     w = st.slider("w（幅）", 0.50, 1.25, 0.90, 0.01)
@@ -432,7 +419,6 @@ with st.expander("微調整（上級者向け）", expanded=False):
 btn1, _ = st.columns(2)
 with btn1:
     gen_btn = st.button("👕 試着する", disabled=(not ready_all), use_container_width=True)
-
 
 # -------------------------
 # Main layout (Preview / Result)
@@ -451,7 +437,7 @@ with col1:
 
         st.markdown("---")
 
-        st.markdown("**トップス（透過済み）**")
+        st.markdown("**トップス**")
         if ready_top:
             st.image(top_path, width=720)
         else:
@@ -476,62 +462,57 @@ with col2:
         else:
             st.info("③ 「試着する」を押すと、ここに結果が表示されます")
 
-
 # -------------------------
 # Action
 # -------------------------
 if gen_btn:
-    try:
-        # AUTO / MANUAL 選択
-        if auto_fit and person_rgba_path and os.path.exists(person_rgba_path):
-            cx_use, w_use = estimate_cx_w_from_mask(person_rgba_path)
-            y_use = y
-            last_mode = "AUTO"
+    # まずAUTO推定（cx/w）
+    if auto_fit and person_rgba_path and os.path.exists(person_rgba_path):
+        cx_use, w_use = estimate_cx_w_from_mask(person_rgba_path)
+        y_use = y
+        last_mode = "AUTO"
 
-            # ★AUTOで小さくなりすぎるのを防ぐ（下限）
-            if not is_child:
-                w_use = max(w_use, 1.00)   # 大人
-            else:
-                w_use = max(w_use, 0.98)   # 子供
-
-            # ★AUTOでデカくなりすぎるのも防ぐ（上限）
-            if not is_child:
-                w_use = min(w_use, 1.06)   # 大人（まずは安全側）
-            else:
-                w_use = min(w_use, 1.02)   # 子供（デカくなりやすいので控えめ）
+        # ★AUTOで小さくなりすぎるのを防ぐ（下限）
+        if not is_child:
+            w_use = max(w_use, 1.00)   # 大人
         else:
-            cx_use, y_use, w_use = cx, y, w
-            last_mode = "MANUAL"
+            w_use = max(w_use, 0.98)   # 子供
 
-        # 体型モード補正（軽め）
-        if is_child:
-            y_use = min(0.40, max(0.06, y_use + 0.02))
-            w_use = min(1.25, w_use + 0.02)
+        # ★AUTOでデカくなりすぎるのも防ぐ（上限）
+        if not is_child:
+            w_use = min(w_use, 1.06)   # 大人
         else:
-            y_use = min(0.40, max(0.04, y_use - 0.02))
-            w_use = min(1.25, w_use + 0.03)
+            w_use = min(w_use, 1.02)   # 子供
+    else:
+        cx_use, y_use, w_use = cx, y, w
+        last_mode = "MANUAL"
 
-        # 実行
-        rc = do_generate(
-            out_path=OUT_FINAL,
-            label=f"生成中（{last_mode}）",
-            person_path=person_path,
-            top_path=top_path,
-            person_rgba_path=person_rgba_path,
-            cx_in=cx_use,
-            y_in=y_use,
-            w_in=w_use,
-            angle_in=angle,
-            alpha_in=alpha,
-            is_free=is_free,
-        )
+    # 体型モード補正（子供：上唇問題を避ける方向に調整）
+    # ※ collar_lift は step_top_overlay 側で子供弱体化するので、ここは触りすぎない
+    if is_child:
+        # 子供は「上に上がりやすい」ので、yは“ちょい下げ”方向（=増やす）
+        y_use = min(0.40, max(0.08, y_use + 0.01))
+        # 幅は胴体OK維持：極端に増やさない
+        w_use = min(0.92, max(0.72, w_use))
+    else:
+        y_use = min(0.40, max(0.04, y_use - 0.01))
+        w_use = min(1.10, max(1.00, w_use))
 
-        st.session_state.has_generated = (rc == 0)
-        if rc == 0:
-            st.rerun()
+    rc = do_generate(
+        out_path=OUT_FINAL,
+        label=f"生成中（{last_mode}）",
+        person_path=person_path,
+        top_path=top_path,
+        person_rgba_path=person_rgba_path,
+        cx_in=cx_use,
+        y_in=y_use,
+        w_in=w_use,
+        angle_in=angle,
+        alpha_in=alpha,
+        is_free=is_free,
+        is_child=is_child,
+    )
 
-    except Exception as e:
-        # ✅ Cloudで「Connecting...」になって落ちる時も、ここで拾えれば画面に出る
-        st.error("❌ 試着処理中に内部エラーが発生しました（原因を表示します）")
-        st.exception(e)
-        raise
+    st.session_state.has_generated = (rc == 0)
+    if rc == 0:
+        st.rerun()
