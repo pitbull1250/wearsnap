@@ -186,8 +186,9 @@ def main():
             if mask_u8 is not None:
                 neck_y = estimate_neck_y_from_mask(mask_u8)
 
-    # 推定クリップ
-    neck_y = min(neck_y, int(H * 0.24))
+    # 推定クリップ（子供は上寄りに制限 / 大人は少し下まで許容）
+    neck_cap = 0.22 if is_child else 0.24
+    neck_y = min(neck_y, int(H * neck_cap))
     neck_y = max(neck_y, int(H * 0.12))
     print("DEBUG neck_y(px) =", neck_y, "/ H =", H, "=> ratio =", round(neck_y / H, 3))
 
@@ -195,7 +196,7 @@ def main():
     if is_child:
         collar_lift = int(H * 0.005)  # 子供：0.5%
     else:
-        collar_lift = int(H * 0.015)  # 大人：1.5%
+        collar_lift = int(H * 0.004)  # 大人：0.4%
 
     # --- 胴体だけ「元の服を消す（下地化）」処理（rembgマスク使用） ---
     if args.person_rgba and os.path.exists(args.person_rgba):
@@ -296,7 +297,13 @@ def main():
 
     a2 = top_rot_f[:, :, 3:4] / 255.0
     eps = 1e-6
-    top_rot_f[:, :, :3] = np.where(a2 > eps, top_rot_f[:, :, :3] / a2, 0.0)
+    rgb = top_rot_f[:, :, :3]
+    a2 = top_rot_f[:, :, 3:4] / 255.0  # shape (H,W,1)
+    eps = 1e-6
+
+    out = np.zeros_like(rgb, dtype=np.float32)
+    np.divide(rgb, a2, out=out, where=(a2 > eps))
+    top_rot_f[:, :, :3] = out
 
     # 仕上げ：alphaを少しだけ縮めて境界をきれいに
     alpha_u8 = np.clip(top_rot_f[:, :, 3], 0, 255).astype(np.uint8)
@@ -318,8 +325,10 @@ def main():
         left, top_y, right, bottom = bb
         bb_cx = (left + right) / 2.0
 
-        # ✅ 上端(襟の立ち上がり)を少し無視して「襟基準」を下げる
-        collar_bias = int(th * 0.06)  # まず8%（効き弱ければ 0.10〜0.12 に上げる）
+        # ✅ 上端(襟)の"余白"を少し無視して、襟基準を安定させる
+        # th(服の高さ)に比例させつつ、効きすぎ/効かなすぎを防ぐ
+        collar_bias = int(th * 0.035)
+        collar_bias = max(4, min(14, collar_bias))   # 4〜14pxにクリップ（大人の安定域）
 
         x = int(W * float(args.cx) - bb_cx)
         y = int(neck_y + H * float(args.y) - top_y - collar_lift + collar_bias)

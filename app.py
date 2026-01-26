@@ -1,4 +1,3 @@
-# app.py
 import io
 import os
 import sys
@@ -17,10 +16,12 @@ from rembg.session_factory import new_session
 # =========================
 st.set_page_config(page_title="WearSnap", layout="wide")
 
+
 # =========================
-# Rembg session (global)
+# rembg session (global)
 # =========================
-REMBG_SESSION = new_session("u2net")  # or "u2netp" (light)
+REMBG_SESSION = new_session("u2net")  # or "u2netp"
+
 
 # =========================
 # Paths
@@ -56,7 +57,7 @@ if "top_path" not in st.session_state:
 def apply_watermark_any(
     path: str,
     text: str = "WearSnap",
-    opacity_pct: float = 0.22,  # 少し濃く（薄すぎ防止）
+    opacity_pct: float = 0.22,
     angle: float = 18.0,
 ):
     """PNG/JPG両対応：白文字+黒縁取りの透かし（明るい背景でも見える）"""
@@ -66,10 +67,8 @@ def apply_watermark_any(
     img = Image.open(path).convert("RGBA")
     W, H = img.size
 
-    # 画像サイズに応じてフォントを決める
     font_size = max(26, int(min(W, H) * 0.10))
 
-    # フォント選択
     font = None
     candidates = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",  # Streamlit Cloud
@@ -88,7 +87,6 @@ def apply_watermark_any(
     overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
-    # 文字サイズ計測
     try:
         bbox = draw.textbbox((0, 0), text, font=font)
         tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
@@ -103,14 +101,12 @@ def apply_watermark_any(
         (W - tw - margin, H - th - margin),    # 右下
     ]
 
-    # 白文字 + 黒縁取り（明るい背景でも確実に見える）
     alpha = int(255 * max(0.0, min(1.0, opacity_pct)))
     fill = (255, 255, 255, alpha)                 # 白
     stroke = (0, 0, 0, int(alpha * 0.85))          # 黒縁
-    stroke_width = max(2, int(font_size * 0.06))   # だいたい2〜6pxくらい
+    stroke_width = max(2, int(font_size * 0.06))   # 2〜6px
 
     for (x, y) in positions:
-        # 縁取り
         try:
             draw.text(
                 (x, y),
@@ -121,17 +117,15 @@ def apply_watermark_any(
                 stroke_fill=stroke,
             )
         except TypeError:
-            # 古いPillow対策（strokeが使えない場合）
+            # 古いPillow対策
             for dx in (-1, 0, 1):
                 for dy in (-1, 0, 1):
                     draw.text((x + dx, y + dy), text, font=font, fill=stroke)
             draw.text((x, y), text, font=font, fill=fill)
 
-    # 回転して合成
     overlay = overlay.rotate(angle, resample=Image.BICUBIC, expand=False)
     out = Image.alpha_composite(img, overlay)
 
-    # 保存（PNG/JPG両対応）
     if path.lower().endswith(".png"):
         out.save(path, format="PNG")
     else:
@@ -144,7 +138,6 @@ def auto_rgba_with_rembg(uploaded_bytes: bytes, out_path: str):
 
     inp = Image.open(io.BytesIO(uploaded_bytes)).convert("RGBA")
 
-    # PNG bytes にしてから rembg（安定）
     buf = io.BytesIO()
     inp.save(buf, format="PNG")
     out_bytes = remove(buf.getvalue(), session=REMBG_SESSION)
@@ -164,89 +157,26 @@ def run_tryon(
     alpha: float,
     out_path: str,
     person_rgba_path: str = None,
-    is_child: bool = False,
 ):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
     cmd = [
-        sys.executable,
-        "step_top_overlay.py",
-        "--person",
-        person_path,
-        "--top",
-        top_path,
-        "--cx",
-        f"{cx:.4f}",
-        "--y",
-        f"{y:.4f}",  # 首から下へ（H比）
-        "--w",
-        f"{w:.4f}",
-        "--angle",
-        f"{angle:.4f}",
-        "--alpha",
-        f"{alpha:.4f}",
-        "--out",
-        out_path,
+        sys.executable, "step_top_overlay.py",
+        "--person", person_path,
+        "--top", top_path,
+        "--cx", f"{cx:.4f}",
+        "--y", f"{y:.4f}",
+        "--w", f"{w:.4f}",
+        "--angle", f"{angle:.4f}",
+        "--alpha", f"{alpha:.4f}",
+        "--out", out_path,
     ]
 
     if person_rgba_path and os.path.exists(person_rgba_path):
         cmd += ["--person_rgba", person_rgba_path]
 
-    # ✅ 子供フラグ（step_top_overlay側で collar_lift / 下地帯 を分岐）
-    if is_child:
-        cmd += ["--is_child"]
-
     p = subprocess.run(cmd, capture_output=True, text=True)
     return p.returncode, p.stdout, p.stderr, " ".join(cmd)
-
-
-def estimate_cx_w_from_mask(person_rgba_path: str):
-    """
-    マスクから「胴体っぽい範囲」を取り、cxとwだけ推定
-    yは首基準なのでスライダー/固定値が安定
-    """
-    import cv2
-    import numpy as np
-
-    cx = 0.50
-    w = 0.90
-
-    if not person_rgba_path or not os.path.exists(person_rgba_path):
-        return cx, w
-
-    rgba = cv2.imread(person_rgba_path, cv2.IMREAD_UNCHANGED)
-    if rgba is None or rgba.ndim != 3 or rgba.shape[2] != 4:
-        return cx, w
-
-    alpha = rgba[:, :, 3]
-    mask = (alpha > 10).astype(np.uint8) * 255
-    H, W = mask.shape[:2]
-
-    ys, xs = np.where(mask > 0)
-    if xs.size == 0:
-        return cx, w
-
-    y0, y1 = int(ys.min()), int(ys.max())
-    x0, x1 = int(xs.min()), int(xs.max())
-    bbox_h = max(1, (y1 - y0 + 1))
-
-    # 胴体帯（頭と脚を避ける）
-    t0 = int(y0 + bbox_h * 0.25)
-    t1 = int(y0 + bbox_h * 0.75)
-
-    rows = np.arange(H)[:, None]
-    torso = (mask > 0) & (rows >= t0) & (rows <= t1)
-    ys2, xs2 = np.where(torso)
-
-    if xs2.size > 0:
-        x0, x1 = int(xs2.min()), int(xs2.max())
-
-    cx = ((x0 + x1) / 2) / float(W)
-    w = ((x1 - x0 + 1) / float(W)) * 1.10
-
-    cx = float(max(0.0, min(1.0, cx)))
-    w = float(max(0.70, min(1.25, w)))
-    return cx, w
 
 
 def do_generate(
@@ -261,20 +191,15 @@ def do_generate(
     angle_in: float,
     alpha_in: float,
     is_free: bool,
-    is_child: bool,
 ):
     with st.spinner(f"{label}..."):
         rc, out, err, cmdline = run_tryon(
-            person_path=person_path,
-            top_path=top_path,
-            cx=cx_in,
-            y=y_in,
-            w=w_in,
-            angle=angle_in,
-            alpha=alpha_in,
-            out_path=out_path,
+            person_path,
+            top_path,
+            cx_in, y_in, w_in,
+            angle_in, alpha_in,
+            out_path,
             person_rgba_path=person_rgba_path,
-            is_child=is_child,
         )
 
         with st.expander("🛠 実行ログ（デバッグ）", expanded=False):
@@ -287,11 +212,8 @@ def do_generate(
             return rc
 
         if is_free:
-            try:
-                apply_watermark_any(out_path)
-                st.sidebar.warning("無料プラン：透かしを適用しました ✅")
-            except Exception as e:
-                st.sidebar.error(f"透かしで例外: {e}")
+            apply_watermark_any(out_path)
+            st.sidebar.warning("無料プラン：透かしを適用しました ✅")
         else:
             st.sidebar.success("有料プラン：透かしなし ✅")
 
@@ -303,7 +225,7 @@ def do_generate(
 # UI
 # =========================
 st.title("👕 WearSnap")
-st.caption("写真1枚で、服の試着イメージをすぐ確認")
+st.caption("写真1枚で、服の試着イメージをすぐ確認（大人モード）")
 
 st.markdown("## プラン")
 plan = st.radio("無料 / 有料", ["無料（透かしあり）", "有料（透かしなし）"], index=0, horizontal=True)
@@ -346,10 +268,6 @@ if person_upload is not None:
         st.error("人物写真が読み込めません（JPEG/PNGで再アップロード。HEIC不可）")
         person_path = None
         person_rgba_path = None
-    except Exception as e:
-        st.error(f"人物写真の処理で例外: {e}")
-        person_path = None
-        person_rgba_path = None
 
 # -------------------------
 # Step 2) Top
@@ -367,18 +285,16 @@ if top_upload is not None:
 
     if sig != st.session_state.top_sig:
         st.session_state.top_sig = sig
-        try:
-            st.session_state.top_path = auto_rgba_with_rembg(raw, AUTO_TOP_PATH)
-            st.session_state.has_generated = False
-            if os.path.exists(OUT_FINAL):
-                try:
-                    os.remove(OUT_FINAL)
-                except Exception:
-                    pass
-            st.success("服の背景を自動で透過しました ✅")
-        except Exception as e:
-            st.error(f"服画像の透過で例外: {e}")
-            st.session_state.top_path = None
+        st.session_state.top_path = auto_rgba_with_rembg(raw, AUTO_TOP_PATH)
+
+        st.session_state.has_generated = False
+        if os.path.exists(OUT_FINAL):
+            try:
+                os.remove(OUT_FINAL)
+            except Exception:
+                pass
+
+        st.success("服の背景を自動で透過しました ✅")
 
 top_path = st.session_state.top_path
 
@@ -399,20 +315,15 @@ with c2:
 # -------------------------
 # Step 3) Settings + Run
 # -------------------------
-st.markdown("## 3) 設定して試着")
-
-mode = st.radio("体型モード", ["大人", "子供（小学生以下）"], index=0, horizontal=True)
-is_child = mode.startswith("子供")
-
-auto_fit = st.checkbox("自動位置合わせ（おすすめ）", value=True)
+st.markdown("## 3) 設定して試着（大人）")
 
 with st.expander("微調整（上級者向け）", expanded=False):
     cx = st.slider("cx（中心X）", 0.00, 1.00, 0.50, 0.01)
 
-    # 首基準：首から下へ（H比）
-    y = st.slider("y（首から下へ）", 0.00, 0.40, 0.10, 0.01)
+    # ✅ 大人はここが命：小さくすると上がる / 大きくすると下がる
+    y = st.slider("y（首から下へ）", 0.00, 0.40, 0.08, 0.01)
 
-    w = st.slider("w（幅）", 0.50, 1.25, 0.90, 0.01)
+    w = st.slider("w（幅）", 0.70, 1.25, 1.03, 0.01)
     angle = st.slider("angle（回転）", -10.0, 10.0, -1.5, 0.5)
     alpha = st.slider("alpha（透過）", 0.10, 1.00, 1.00, 0.01)
 
@@ -466,37 +377,9 @@ with col2:
 # Action
 # -------------------------
 if gen_btn:
-    # まずAUTO推定（cx/w）
-    if auto_fit and person_rgba_path and os.path.exists(person_rgba_path):
-        cx_use, w_use = estimate_cx_w_from_mask(person_rgba_path)
-        y_use = y
-        last_mode = "AUTO"
-
-        # ★AUTOで小さくなりすぎるのを防ぐ（下限）
-        if not is_child:
-            w_use = max(w_use, 1.00)   # 大人
-        else:
-            w_use = max(w_use, 0.98)   # 子供
-
-        # ★AUTOでデカくなりすぎるのも防ぐ（上限）
-        if not is_child:
-            w_use = min(w_use, 1.06)   # 大人
-        else:
-            w_use = min(w_use, 1.02)   # 子供
-    else:
-        cx_use, y_use, w_use = cx, y, w
-        last_mode = "MANUAL"
-
-    # 体型モード補正（子供：上唇問題を避ける方向に調整）
-    # ※ collar_lift は step_top_overlay 側で子供弱体化するので、ここは触りすぎない
-    if is_child:
-        # 子供は「上に上がりやすい」ので、yは“ちょい下げ”方向（=増やす）
-        y_use = min(0.40, max(0.08, y_use + 0.01))
-        # 幅は胴体OK維持：極端に増やさない
-        w_use = min(0.92, max(0.72, w_use))
-    else:
-        y_use = min(0.40, max(0.04, y_use - 0.01))
-        w_use = min(1.10, max(1.00, w_use))
+    # 大人は余計な補正をしない（ブレの原因になる）
+    cx_use, y_use, w_use = cx, y, w
+    last_mode = "MANUAL"
 
     rc = do_generate(
         out_path=OUT_FINAL,
@@ -510,7 +393,6 @@ if gen_btn:
         angle_in=angle,
         alpha_in=alpha,
         is_free=is_free,
-        is_child=is_child,
     )
 
     st.session_state.has_generated = (rc == 0)
