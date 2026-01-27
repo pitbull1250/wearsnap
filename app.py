@@ -54,6 +54,15 @@ if "top_path" not in st.session_state:
 # =========================
 # Utils
 # =========================
+def resize_max_side(img: Image.Image, max_side: int = 1600) -> Image.Image:
+    """最大辺を max_side に収める（アスペクト比維持）"""
+    w, h = img.size
+    m = max(w, h)
+    if m <= max_side:
+        return img
+    scale = max_side / float(m)
+    nw, nh = int(w * scale), int(h * scale)
+    return img.resize((nw, nh), Image.LANCZOS)
 def apply_watermark_any(
     path: str,
     text: str = "WearSnap",
@@ -137,6 +146,7 @@ def auto_rgba_with_rembg(uploaded_bytes: bytes, out_path: str):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
     inp = Image.open(io.BytesIO(uploaded_bytes)).convert("RGBA")
+    inp = resize_max_side(inp, 1600)   # ★ここ追加（服）
 
     buf = io.BytesIO()
     inp.save(buf, format="PNG")
@@ -252,6 +262,7 @@ if person_upload is not None:
         raw = person_upload.getvalue()
 
         img = Image.open(io.BytesIO(raw)).convert("RGB")
+        img = resize_max_side(img, 1600)   # ★ここ追加（人物）
         img.save(PERSON_RGB, quality=95)
         person_path = PERSON_RGB
 
